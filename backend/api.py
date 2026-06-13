@@ -1,0 +1,336 @@
+"""
+FastAPI endpoints for Job Application Helper backend.
+
+Exposes a single POST /analyze endpoint that the React frontend calls.
+Run with:
+    uvicorn backend.api:app --reload --port 8000
+"""
+
+import io
+import os
+import tempfile
+import time
+from typing import Optional
+
+from docx import Document  # python-docx — used to read .docx resumes
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pypdf import PdfReader
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+load_dotenv()
+
+from backend.agent import generate_resume_feedback_prompt, run_agent_analysis
+from backend.nlp_processor import (
+    calculate_skill_match_score,
+    extract_education_field_with_llm,
+    extract_education_with_llm,
+    extract_job_seniority,
+    extract_job_title_and_seniority,
+    extract_qualifications,
+    extract_resume_education_degree,
+    extract_resume_education_field,
+    extract_resume_seniority,
+    extract_resume_skills,
+    extract_skills_with_llm,
+    map_skills_to_source,
+    match_education,
+    match_seniority,
+)
+from backend.rag_system import RAGSystem
+
+app = FastAPI(title="Job Application Helper API")
+
+# ── Rate limiting (slowapi) ──────────────────────────────────────────────────
+# Per-IP limits prevent any single user from burning through the OpenAI budget.
+# This is a soft protection — pair it with a hard $X/month spending cap on
+# platform.openai.com as the ultimate safety net.
+
+def get_real_ip(request: Request):
+    forwarded = request.headers.get("X-Forwarded-For")
+    return forwarded.split(",")[0].strip() if forwarded else get_remote_address(request)
+
+limiter = Limiter(key_func=get_real_ip)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CORS: always allow the React dev servers (Vite :5173, CRA :3000) for local
+# development, plus any additional origins listed in FRONTEND_URL env var
+# (comma-separated). In production, set FRONTEND_URL to your deployed
+# frontend's URL, e.g. "https://jobmigo.vercel.app".
+_dev_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
+_prod_origins = [
+    o.strip() for o in os.getenv("FRONTEND_URL", "").split(",") if o.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_dev_origins + _prod_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _check_field_match(job_fields, resume_fields):
+    """Mirror of streamlit_app.check_field_match.
+
+    Returns (match_found, matched_job_field, matched_resume_field).
+    """
+    if not job_fields:
+        return True, None, None
+    if not resume_fields:
+        return False, None, None
+
+    for job_field in job_fields:
+        job_words = set(job_field.lower().split())
+        for resume_field in resume_fields:
+            resume_words = set(resume_field.lower().split())
+            overlap = job_words & resume_words
+            max_len = max(len(job_words), len(resume_words))
+            if len(job_words) == 1 and len(resume_words) == 1:
+                if job_words == resume_words:
+                    return True, job_field, resume_field
+            elif max_len and len(overlap) / max_len >= 0.5:
+                return True, job_field, resume_field
+
+    return False, None, None
+
+
+def _extract_resume_text(upload: UploadFile) -> str:
+    """Read resume bytes from the upload and return decoded text.
+
+    Supports PDF (via pypdf) and Word documents (via doc or docx). Raises HTTPException on failure.
+    """
+    raw = upload.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    is_pdf = (
+        (upload.content_type or "").lower() == "application/pdf"
+        or (upload.filename or "").lower().endswith(".pdf")
+    )
+
+    is_word = (
+        (upload.content_type or "").lower() in [
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ]
+        or (upload.filename or "").lower().endswith((".doc", ".docx"))
+    )
+
+    if is_pdf:
+        try:
+            reader = PdfReader(io.BytesIO(raw))
+            pages = [p.extract_text() or "" for p in reader.pages]
+            text = "\n".join(pages).strip()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not read PDF: {exc}. Try re-saving the PDF and uploading again.",
+            )
+    elif is_word:
+        try:
+            doc = Document(io.BytesIO(raw))
+            text = "\n".join([p.text for p in doc.paragraphs]).strip()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not read Word document: {exc}. Try re-saving the document and uploading again.",
+            )
+    else:
+        text = raw.decode("utf-8", errors="ignore").strip()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Could not extract text from the uploaded resume.")
+    return text
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/analyze")
+@limiter.limit("10/hour")  # Adjust as needed based on expected traffic and OpenAI budget
+async def analyze(
+    request: Request,
+    job_description: str = Form(""),
+    resume: Optional[UploadFile] = File(None),
+):
+    """Run the full resume/job analysis pipeline and return JSON.
+
+    Either `resume` or `job_description` must be provided.
+    """
+    if not job_description and resume is None:
+        raise HTTPException(status_code=400, detail="Provide a resume, a job description, or both.")
+
+    MAX_JD_CHARS = 15_000
+    if len(job_description) > MAX_JD_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job description is too long ({len(job_description):,} characters). Please shorten it to under {MAX_JD_CHARS:,} characters.",
+        )
+    # ── Job-side extraction ────────────────────────────────────────────────
+    if job_description:
+        job_required, job_preferred = extract_qualifications(job_description)
+        job_skills = extract_skills_with_llm(job_description, context="job_posting")
+        job_required_education = extract_education_with_llm(job_description)
+        job_required_education_fields = extract_education_field_with_llm(job_description)
+        # extract_job_seniority is the hybrid YoE+title pipeline (more accurate
+        # for edge cases like "AI Engineer I, 4+ years"). Only fall back to the
+        # title-only LLM extractor if the hybrid returns nothing.
+        job_seniority = (
+            extract_job_seniority(job_description)
+            or extract_job_title_and_seniority(job_description)[1]
+        )
+    else:
+        job_required, job_preferred = [], []
+        job_skills = []
+        job_required_education = []
+        job_required_education_fields = []
+        job_seniority = None
+
+    # ── Resume-side extraction ─────────────────────────────────────────────
+    resume_text = ""
+    if resume is not None:
+        resume_text = _extract_resume_text(resume)
+
+    rag = None
+    if resume_text:
+        rag = RAGSystem(
+            collection_name=f"api_resume_{int(time.time())}",
+            embedding_backend=os.getenv("RAG_EMBEDDING_BACKEND", "auto"),
+            persist_directory=None,
+        )
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+            tmp.write(resume_text)
+            tmp_path = tmp.name
+        try:
+            chunks = rag.load_and_process_document(tmp_path, chunk_size=500, overlap=50)
+            rag.create_vectorstore(chunks)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    if resume_text:
+        try:
+            resume_skills = extract_skills_with_llm(resume_text, context="resume")
+        except Exception:
+            resume_skills = extract_resume_skills(resume_text=resume_text)
+    else:
+        resume_skills = []
+
+    rag_instance = rag if (resume_text and rag and rag.vectorstore) else None
+    resume_education = extract_resume_education_degree(rag_instance=rag_instance, resume_text=resume_text or None)
+    resume_education_fields = extract_resume_education_field(rag_instance=rag_instance, resume_text=resume_text or None)
+    resume_seniority = extract_resume_seniority(resume_text=resume_text) if resume_text else None
+
+    # ── Skill matching (required + preferred merged into one) ──────────────
+    req_bullets = job_required if isinstance(job_required, list) else []
+    pref_bullets = job_preferred if isinstance(job_preferred, list) else []
+    req_for_match = list(dict.fromkeys(job_skills + req_bullets + pref_bullets))
+    skills_match = calculate_skill_match_score(req_for_match, [], resume_skills)
+    unmatched_skills = [u["job_skill"] for u in skills_match["details"]["required"].get("unmatched", [])]
+
+    # ── Education matching ─────────────────────────────────────────────────
+    education_match = match_education(
+        job_required_education,
+        [],
+        resume_education,
+        resume_education_fields,
+    )
+    field_match_found, matched_job_field, matched_resume_field = _check_field_match(
+        job_required_education_fields, resume_education_fields
+    )
+
+    # ── Seniority matching ─────────────────────────────────────────────────
+    seniority_match = (
+        match_seniority(job_seniority, resume_seniority)
+        if (job_seniority or resume_seniority)
+        else {}
+    )
+
+    # ── Agent feedback (only if a resume was uploaded) ─────────────────────
+    skills_by_source = map_skills_to_source(resume_text, resume_skills) if resume_skills else {}
+    degree_match = education_match.get("required_degree_matched", False)
+
+    extraction_results = {
+        "skills_match": skills_match,
+        "skills_by_source": skills_by_source,
+        "education_match": {
+            "is_match": degree_match,
+            "job_required_education": job_required_education,
+            "required_degree_matched": degree_match,
+            "required_degree_job": job_required_education,
+            "required_degree_resume": resume_education,
+            "education_field_job": job_required_education_fields,
+            "resume_education_fields": resume_education_fields,
+            "education_field_matched": (
+                education_match.get("field_matched", False) or field_match_found
+            ),
+            "warning": education_match.get("warning", ""),
+        },
+        "seniority_match": seniority_match,
+        "qualifications_job_required": list(dict.fromkeys(req_bullets + pref_bullets)),
+        "qualifications_job_preferred": [],
+    }
+
+    feedback_markdown = ""
+    if resume_text and rag and rag.vectorstore:
+        job_title = job_description.split("\n")[0].strip() if job_description else "Position"
+        feedback_prompt = generate_resume_feedback_prompt(
+            job_title, job_description, extraction_results, resume_text=resume_text
+        )
+        try:
+            feedback_markdown = run_agent_analysis(feedback_prompt, rag_instance=rag)
+        except Exception as exc:
+            feedback_markdown = f"_Could not generate AI feedback: {exc}_"
+
+    # ── Response payload for the React frontend ────────────────────────────
+    return {
+        "skills": {
+            "coverage": skills_match["required_score"],
+            "matched": skills_match["required_matches"],
+            "unmatched": unmatched_skills,
+            "job_skills": req_for_match,
+            "resume_skills": resume_skills,
+        },
+        "education": {
+            "job_required_degrees": job_required_education,
+            "resume_degrees": resume_education,
+            "job_required_fields": job_required_education_fields,
+            "resume_fields": resume_education_fields,
+            "degree_matched": degree_match,
+            "field_matched": field_match_found,
+            "matched_job_field": matched_job_field,
+            "matched_resume_field": matched_resume_field,
+        },
+        "seniority": {
+            "job": job_seniority,
+            "resume": resume_seniority,
+            "is_match": seniority_match.get("is_match"),
+            "is_overqualified": seniority_match.get("is_overqualified"),
+            "is_underqualified": seniority_match.get("is_underqualified"),
+            "warning": seniority_match.get("warning"),
+            "recommendation": seniority_match.get("recommendation"),
+        },
+        "qualifications": list(dict.fromkeys(req_bullets + pref_bullets)),
+        "feedback_markdown": feedback_markdown,
+    }
