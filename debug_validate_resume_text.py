@@ -2,6 +2,7 @@
 
 Usage:
     python debug_validate_resume_text.py --resume "C:/path/to/Harshil_Pahuja_Resume.pdf"
+    python debug_validate_resume_text.py --resume "C:/path/to/Harshil_Pahuja_Resume.pdf" --mock-llm
 
 If --resume is omitted, the script tries to auto-find a file that contains
 "harshil" or "pahuja" in common project locations.
@@ -17,6 +18,7 @@ from docx import Document
 from fastapi import HTTPException
 from pypdf import PdfReader
 
+import backend.api as api_module
 from backend.api import (
     RESUME_OPTIONAL_SIGNALS,
     RESUME_REQUIRED_SECTIONS,
@@ -24,6 +26,25 @@ from backend.api import (
     re,
     validate_resume_text,
 )
+
+
+class _FakeResumeValidationResponse:
+    content = """
+{
+  "is_resume": true,
+  "document_type": "resume",
+  "confidence": 0.95,
+  "reason": "Mocked validation response for local debugging."
+}
+"""
+
+
+class _FakeChatOpenAI:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def invoke(self, prompt):
+        return _FakeResumeValidationResponse()
 
 
 def _iter_candidate_paths() -> Iterable[Path]:
@@ -85,7 +106,16 @@ def main() -> int:
         default="",
         help="Path to resume file (.pdf, .doc, .docx, .txt).",
     )
+    parser.add_argument(
+        "--mock-llm",
+        action="store_true",
+        help="Mock the ChatOpenAI validator so this script tests local validation without calling OpenAI.",
+    )
     args = parser.parse_args()
+
+    if args.mock_llm:
+        api_module.ChatOpenAI = _FakeChatOpenAI
+        print("Using mocked ChatOpenAI resume validation response.")
 
     if args.resume:
         resume_path = Path(args.resume).expanduser()
@@ -122,6 +152,9 @@ def main() -> int:
         print("\n[RESULT] FAIL: validate_resume_text raised HTTPException")
         print(f"- status_code: {exc.status_code}")
         print(f"- detail: {exc.detail}")
+        if exc.__cause__ is not None:
+            print(f"- cause_type: {type(exc.__cause__).__name__}")
+            print(f"- cause_detail: {exc.__cause__}")
         return 2
     except Exception as exc:
         print("\n[RESULT] FAIL: Unexpected exception")

@@ -1,0 +1,8 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\harsh\\OneDrive\\Desktop\\job_app_helper']
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+INFO:     Started reloader process [52360] using WatchFiles
+C:\Users\harsh\OneDrive\Desktop\job_app_helper\.venv\Lib\site-packages\langgraph\checkpoint\serde\encrypted.py:5: LangChainPendingDeprecationWarning: The default value of `allowed_objects` will change in a future version. Pass an explicit value (e.g., allowed_objects='messages' or allowed_objects='core') to suppress this warning.
+  from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+INFO:     Started server process [37936]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.

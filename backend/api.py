@@ -10,6 +10,7 @@ import io
 import os
 import tempfile
 import time
+import re
 from typing import Optional
 
 from docx import Document  # python-docx — used to read .docx resumes
@@ -17,11 +18,14 @@ from docx import Document  # python-docx — used to read .docx resumes
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
 from pypdf import PdfReader
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+import json
+from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
@@ -45,15 +49,14 @@ from backend.nlp_processor import (
 from backend.rag_system import RAGSystem
 
 app = FastAPI(title="Job Application Helper API")
+DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
 
 # ── Rate limiting (slowapi) ──────────────────────────────────────────────────
 # Per-IP limits prevent any single user from burning through the OpenAI budget.
-# This is a soft protection — pair it with a hard $X/month spending cap on
-# platform.openai.com as the ultimate safety net.
+# This is a soft protection
 
 def get_real_ip(request: Request):
-    forwarded = request.headers.get("X-Forwarded-For")
-    return forwarded.split(",")[0].strip() if forwarded else get_remote_address(request)
+    return get_remote_address(request)
 
 limiter = Limiter(key_func=get_real_ip)
 app.state.limiter = limiter
@@ -110,15 +113,192 @@ def _check_field_match(job_fields, resume_fields):
 
     return False, None, None
 
+RESUME_SUPPLEMENTAL_SIGNALS = [
+    "projects",
+    "certifications",
+    "summary",
+    "objective",
+    "work experience",
+    "professional experience",
+    "technical skills",
+    "github",
+    "linkedin",
+]
+
+name_patterns = [
+    r"\b[A-Z][a-z]+ [A-Z][a-z]+\b",                           # John Smith
+    r"\b[A-Z][a-z]+ [A-Z]\. [A-Z][a-z]+\b",                  # John R. Smith
+    r"\b[A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+\b",             # John Robert Smith
+    r"\b[A-Z]{2,} [A-Z]{2,}\b",                             # HARSHIL PAHUJA
+    r"\b[A-Z][a-z]+(?:-[A-Z][a-z]+)? [A-Z][a-z]+(?:-[A-Z][a-z]+)?\b",
+    r"\b[A-Z][a-z]+(?:'[A-Z][a-z]+)? [A-Z][a-z]+(?:'[A-Z][a-z]+)?\b",
+]
+
+# Check whether the user actually uploaded a valid resume and not some other document.
+def validate_resume_text(text: str) -> None:
+    normalized = text.lower()
+
+    has_education = "education" in normalized
+    has_skills = "skills" in normalized or "technical skills" in normalized
+    has_experience_signal = any(
+        signal in normalized
+        for signal in [
+            "experience",
+            "work experience",
+            "professional experience",
+            "internships",
+            "projects",
+            "project experience",
+        ]
+    )
+
+    if not (has_education and has_skills and has_experience_signal):
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded document does not look like a resume. Please upload a resume with sections for work experience, education, and skills at the minimum, and try again."
+        )
+
+    supplemental_matches = sum(
+        1 for signal in RESUME_SUPPLEMENTAL_SIGNALS if signal in normalized
+    )
+
+    if supplemental_matches < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded document is not detailed enough to provide useful feedback. Consider adding more information about your projects, certifications, and extracurricular activities, and try again."
+        )
+    
+    # Required header information
+    header = text[:500]
+    has_full_name = any(re.search(pattern, header) for pattern in name_patterns)
+    has_email = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", header) is not None
+    has_phone = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", header) is not None
+
+    if not has_full_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not detect a full name in the resume. Please make sure your full name is included and try again."
+        )
+    
+    if not has_email and not has_phone:
+        raise HTTPException(
+            status_code=400,
+            detail="Resume must include contact information."
+        )
+
+    # If deterministic local checks pass, the document is valid enough to
+    # continue. The LLM is an extra guard against cover letters/other docs,
+    # but model/API/JSON-format failures should not become user-facing 500s.
+    try:
+
+        validator = ChatOpenAI(
+            model="gpt-4o",
+            temperature=0
+        )
+
+        response = validator.invoke(
+            f"""
+You are validating uploaded documents for a resume analysis platform.
+
+Determine whether the uploaded document is a resume.
+
+Return ONLY valid JSON in the following format:
+
+{{
+    "is_resume": true,
+    "document_type": "resume",
+    "confidence": 0.95,
+    "reason": "Brief explanation"
+}}
+
+Valid document types:
+- resume
+- cv
+
+The document has already passed:
+- Full Name Present: {has_full_name}
+- Email Present: {has_email}
+- Phone Present: {has_phone}
+
+A cover letter may contain:
+- experience
+- education
+- skills
+- projects
+
+but should NOT be classified as a resume.
+
+A random document may contain:
+- full name
+- email
+- phone number
+
+but should NOT be classified as a resume.
+
+Document:
+
+{text[:5000]}
+"""
+        )
+
+        if DEBUG_PRIVACY_LOGS:
+            print("[VALIDATION RAW RESPONSE]", repr(response.content))
+
+        try:
+            result = json.loads(response.content)
+        except json.JSONDecodeError as e:
+            print(
+                "[VALIDATION WARNING] "
+                "Skipping LLM resume validation because local checks passed but "
+                f"the LLM returned invalid JSON: {e}"
+            )
+            return
+
+        is_resume = result.get("is_resume", False)
+        document_type = result.get("document_type", "other")
+        confidence = float(result.get("confidence", 0))
+
+        print(
+            f"[VALIDATION] "
+            f"type={document_type}, "
+            f"confidence={confidence:.2f}, "
+            f"is_resume={is_resume}"
+        )
+
+        if not is_resume or confidence < 0.80:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Uploaded document appears to be a "
+                    f"{document_type}, not a resume."
+                )
+            )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(
+            "[VALIDATION WARNING] "
+            "Skipping LLM resume validation because local checks passed but "
+            f"the LLM validation step failed: {type(e).__name__}: {e}"
+        )
+        return
+    
 
 def _extract_resume_text(upload: UploadFile) -> str:
     """Read resume bytes from the upload and return decoded text.
 
     Supports PDF (via pypdf) and Word documents (via doc or docx). Raises HTTPException on failure.
     """
-    raw = upload.file.read()
-    if not raw:
+    if (len(raw := upload.file.read()) == 0):
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    
+    if (len(raw) > 5 * 1024 * 1024):
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file is too large. Please upload a file smaller than 5 MB.",
+        )
 
     is_pdf = (
         (upload.content_type or "").lower() == "application/pdf"
@@ -154,9 +334,45 @@ def _extract_resume_text(upload: UploadFile) -> str:
             )
     else:
         text = raw.decode("utf-8", errors="ignore").strip()
-
+    
     if not text:
-        raise HTTPException(status_code=400, detail="Could not extract text from the uploaded resume.")
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file does not contain any readable text.",
+        )
+    if is_pdf and len(text.strip()) < 300:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The system could not read enough text from this PDF. It may be scanned, image-based, "
+                "or exported in a format it cannot parse. Please either re-format it, re-export it as a text-based PDF, "
+                "or upload a .docx file."
+            ),
+        )
+    if is_pdf and len(text.strip()) > 5_500:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The system could not read this PDF because it is too long. Please re-save it as a .docx file "
+                "or split it into smaller sections and try again."
+            ),
+        )
+    if is_word and len(text.strip()) < 300:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The system could not read enough text from this Word document. It may be corrupted or in a format it cannot parse. "
+                "Please re-save it as a .pdf file and try again."
+            ),
+        )
+    if is_word and len(text.strip()) > 5_500:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The system could not read this Word document because it is too long. Please split it into smaller sections and try again."
+            ),
+        )
+    validate_resume_text(text)
     return text
 
 
@@ -219,14 +435,16 @@ async def analyze(
             embedding_backend=os.getenv("RAG_EMBEDDING_BACKEND", "auto"),
             persist_directory=None,
         )
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
-            tmp.write(resume_text)
-            tmp_path = tmp.name
+        tmp_path = None
         try:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+                tmp.write(resume_text)
+                tmp_path = tmp.name
+
             chunks = rag.load_and_process_document(tmp_path, chunk_size=500, overlap=50)
             rag.create_vectorstore(chunks)
         finally:
-            if os.path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
     if resume_text:
@@ -269,7 +487,11 @@ async def analyze(
 
     # ── Agent feedback (only if a resume was uploaded) ─────────────────────
     skills_by_source = map_skills_to_source(resume_text, resume_skills) if resume_skills else {}
-    degree_match = education_match.get("required_degree_matched", False)
+    degree_match = (
+        education_match.get("required_degree_matched", False)
+        if job_required_education
+        else None
+    )
 
     extraction_results = {
         "skills_match": skills_match,

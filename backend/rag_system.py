@@ -3,6 +3,7 @@ RAG (Retrieval-Augmented Generation) system for resume and job description proce
 Handles embeddings, vector storage, and document retrieval.
 """
 import os
+import logging
 
 from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
 from langchain_community.document_loaders import TextLoader  # type: ignore
@@ -10,6 +11,9 @@ from langchain_community.vectorstores import Chroma  # type: ignore
 from langchain_core.documents import Document  # type: ignore
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.tools import tool  # type: ignore
+
+logger = logging.getLogger(__name__)
+DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
 
 
 class RAGSystem:
@@ -48,7 +52,11 @@ class RAGSystem:
         """Load a document, split it into chunks with section context."""
         loader = TextLoader(file_path, encoding="utf-8")
         documents = loader.load()
-        print(f"Loaded {len(documents)} document(s), total length: {len(documents[0].page_content)} chars")
+        logger.debug(
+            "Loaded %d document(s), total length: %d chars",
+            len(documents),
+            len(documents[0].page_content),
+        )
 
         chunks = []
         chunk_index = 0
@@ -154,7 +162,7 @@ class RAGSystem:
         """Create a vector store from the document chunks."""
         # Filter out empty or whitespace-only chunks
         valid_chunks = [chunk for chunk in chunks if chunk.page_content and chunk.page_content.strip()]
-        print(f"Valid chunks: {len(valid_chunks)}")
+        logger.debug("Valid chunks: %d", len(valid_chunks))
 
         if not valid_chunks:
             raise ValueError("No valid chunks to create vectorstore (all chunks are empty)")
@@ -172,7 +180,6 @@ class RAGSystem:
             raise ValueError("Vector store not created. Please load and process a document first.")
         
         relevant_chunks = self.vectorstore.similarity_search(query, k=top_k)
-        #print(f"Retrieved {len(relevant_chunks)} relevant chunks for query: '{query}'")
         # Sort by chunk_index to return in original document order
         relevant_chunks.sort(key=lambda doc: doc.metadata.get("chunk_index", 0))
         return relevant_chunks
@@ -225,40 +232,43 @@ def main():
                 break
         
         if not resume_path:
-            print("❌ No resume found. Specify a file:")
-            print("  Usage: python -m backend.rag_system <path_to_resume>")
-            sys.exit(1)
+            logger.info("No resume found. Usage: python -m backend.rag_system <path_to_resume>")
+            return
     
-    # Read resume
-    print(f"📄 Loading resume from: {resume_path}")
+    # Read resume. Do not log the path by default because filenames can contain
+    # names or other personal details.
+    logger.info("Loading resume for local RAG debug run")
     with open(resume_path, "r", encoding="utf-8") as f:
         resume_text = f.read()
     
     # Extract skills
-    print("\n🔍 Extracting skills from resume...\n")
+    logger.info("Extracting skills from resume")
     skills = extract_skills(resume_text)
     
-    # Display results
-    print("="*70)
-    print(f"EXTRACTED SKILLS ({len(skills)} total):")
-    print("="*70)
-    for i, skill in enumerate(skills, 1):
-        print(f"{i:2}. {skill}")
+    # Display only aggregate output by default. Extracted skills may reveal
+    # private resume contents, so list them only when privacy debug logging is on.
+    logger.info("Extracted %d skills from resume", len(skills))
+    if DEBUG_PRIVACY_LOGS:
+        logger.info("="*70)
+        logger.info("EXTRACTED SKILLS (%d total):", len(skills))
+        logger.info("="*70)
+        for i, skill in enumerate(skills, 1):
+            logger.info("%2d. %s", i, skill)
     
     # Check for C++
-    print("\n" + "="*70)
+    logger.info("\n" + "="*70)
     cpp_found = any(s.lower() == "c++" for s in skills)
     
     if cpp_found:
-        print("✓ SUCCESS: C++ was extracted from resume!")
+        logger.info("✓ SUCCESS: C++ was extracted from resume")
     else:
-        print("❌ C++ was NOT extracted from resume")
+        logger.warning("C++ was NOT extracted from resume")
         # Check if there are any C-related skills
         c_related = [s for s in skills if "c" in s.lower() and ("+" in s or "sharp" in s)]
-        if c_related:
-            print(f"   Similar skills found: {', '.join(c_related)}")
+        if DEBUG_PRIVACY_LOGS and c_related:
+            logger.info("Similar skills found: %s", ", ".join(c_related))
     
-    print("="*70)
+    logger.info("="*70)
 
 
 if __name__ == "__main__":

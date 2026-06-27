@@ -2,17 +2,19 @@
 LangChain agent logic for resume and job analysis.
 Handles tool calling, agentic workflows, and response generation.
 """
+from __future__ import annotations
+from logging import getLogger
 import os
 from pathlib import Path
 from dotenv import load_dotenv  # type: ignore
 from langchain_openai import ChatOpenAI
+import openai
 from pypdf import PdfReader  # type: ignore
 
 from langchain.chat_models import init_chat_model  # type: ignore
 from langchain.agents import create_agent  # type: ignore
 from langchain_core.messages import HumanMessage  # type: ignore
 from langchain_core.tools import tool  # type: ignore
-from langgraph.checkpoint.memory import InMemorySaver
 
 from backend.rag_system import RAGSystem, create_retrieve_resume_tool  # type: ignore
 
@@ -23,8 +25,8 @@ if not os.getenv("OPENAI_API_KEY"):
     raise SystemExit("Set OPENAI_API_KEY before running this script.")
 
 
-saver = InMemorySaver()
-print("agent.py loaded")
+logger = getLogger(__name__)
+DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
 
 @tool
 def read_project_readme() -> str:
@@ -39,10 +41,9 @@ def create_job_agent(rag_instance: 'RAGSystem' | None = None):
     if rag_instance:
         retrieve_tool = create_retrieve_resume_tool(rag_instance)
         tools.append(retrieve_tool)
-    agent = create_agent(model=model, tools=tools, checkpointer=saver)
+    agent = create_agent(model=model, tools=tools)
     return agent
 
-print("Agent creation function defined")
 
 # Helper constants for detecting weak bullets
 WEAK_ACTION_VERBS = [
@@ -187,6 +188,13 @@ def generate_resume_feedback_prompt(job_title: str, job_description: str, extrac
     education = extraction_results.get('education_match', {})
     seniority = extraction_results.get('seniority_match', {})
     req_quals = extraction_results.get('qualifications_job_required', [])
+    job_required_degrees = education.get('required_degree_job', [])
+    degree_match_value = education.get('required_degree_matched')
+    degree_match_label = (
+        'Not specified'
+        if not job_required_degrees
+        else ('✓ Match' if degree_match_value else '✗ Mismatch')
+    )
     
     # Get skills-by-source mapping to show where each skill comes from
     skills_by_source = extraction_results.get('skills_by_source', {})
@@ -239,9 +247,9 @@ Work experience at: {company_context}{skills_context}
 - Missing Skills: {unmatched_req_str}{source_attribution}
 
 **EDUCATION ANALYSIS:**
-- Match Status: {'✓ Match' if education.get('is_match') else '✗ Mismatch'}
-- Degree Level Match: {'✓ Match' if education.get('required_degree_matched') else '✗ Mismatch'}
-- Job Requires Degree: {', '.join(education.get('required_degree_job', [])) or 'Not specified'}
+- Match Status: {degree_match_label}
+- Degree Level Match: {degree_match_label}
+- Job Requires Degree: {', '.join(job_required_degrees) or 'Not specified'}
 - Your Degree: {', '.join(education.get('required_degree_resume', [])) or 'Not found'}
 - Job Requires Field: {', '.join(education.get('education_field_job', [])) or 'Not specified'}
 - Your Field: {', '.join(education.get('resume_education_fields', [])) or 'Not extracted'}
@@ -277,6 +285,18 @@ For this role, consider rewriting to use stronger action verbs like: "architecte
 Please suggest a rewritten version of this bullet that uses a stronger action verb and better highlights your contribution to this specific role.
 """)
     
+    # SPECIAL CASE: No metric quantification in impact statements
+    weak_bullet = extract_weak_bullet_example(resume_text)
+    if weak_bullet and weak_bullet['issue'] == 'missing_metrics':
+        company_mention = f" at {companies[0]}" if companies else ""
+        special_cases.append(f"""**RECOMMENDATION: Quantify Your Achievements**
+Your resume contains bullets that describe impact but lack quantifiable metrics, weakening their effectiveness.
+Example from your resume{company_mention}:
+- Original: "{weak_bullet['original']}"
+Employers want to see concrete numbers: percentages, dollar amounts, response time reductions, user acquisition, performance improvements, etc.
+Please suggest a rewritten version of this bullet that includes specific metrics or quantifiable results relevant to this role.
+""")
+        
     # SPECIAL CASE: Repetitive use of any action verb more than once across bullets
     _bullet_starts = ('•', '▪', '‣', '⁃', '◦', '-', '*')
     _all_bullets = [
@@ -394,7 +414,7 @@ You can still be competitive by:
 """)
     
     # SPECIAL CASE 6: Degree mismatch
-    degree_mismatch = not education.get('required_degree_matched')
+    degree_mismatch = bool(job_required_degrees) and not education.get('required_degree_matched')
     if degree_mismatch:
         job_degrees = ", ".join(education.get('required_degree_job', []))
         resume_degrees = ", ".join(education.get('required_degree_resume', []))
@@ -405,14 +425,13 @@ You can still be competitive by:
 Degree mismatch: Job requires {job_degrees}, your resume shows {resume_degrees}.
 
 Despite the education gap, you can still be competitive by:
-1. Highlighting relevant coursework, projects, or self-directed learning aligned with the job requirements
-2. Demonstrating transferable knowledge and skills
-3. Showing willingness to pursue relevant certifications or further education
-4. Emphasizing other strengths (experience, technical skills, proven ability to learn quickly)
+1. Pursuing the {job_degrees} through further education or certifications
+2. Highlighting relevant coursework, projects, or self-directed learning aligned with the job requirements
+3. Emphasizing other strengths (experience, technical skills, proven ability to learn quickly)
 """)
     
     # SPECIAL CASE 7: Education mismatches (degree or field) with strong skills
-    if (not education.get('is_match') or degree_mismatch or field_mismatch) and skills.get('required_score', 0) > 0.7:
+    if (degree_mismatch or field_mismatch) and skills.get('required_score', 0) > 0.7:
         company_mention = f" at {', '.join(companies)}" if companies else ""
         special_cases.append(f"""
 **SPECIAL CONSIDERATION - EDUCATION MISMATCH WITH STRONG SKILLS:**
@@ -436,33 +455,41 @@ If any warnings, red flags, or mismatches are listed above (seniority mismatch, 
 **IMPORTANT - SKILL SOURCE ATTRIBUTION:**
 When referencing matched skills in your feedback, you MUST use the "SOURCE ATTRIBUTION FOR MATCHED SKILLS" section above to determine where each skill comes from (company, project, skills section, etc.). Never infer or guess the source of a skill - use the attribution provided. For example, if it says "L3Harris Technologies: C++", always reference C++ as coming from L3Harris, not any other company.
 
-Based on this analysis, please provide:
-1. **Gap Analysis - Skills and Qualifications**
+Based on this analysis, please provide feedback ONLY in the following structured format:
+
+**Introduction:**
+    Write a 1-2 sentence summary of the candidate's overall fit for this role by mentioning whether they are a strong, moderate, or weak match. 
+
+**Gap Analysis - Skills and Qualifications**
    Specifically reference the missing required and preferred skills listed above. For each critical gap, suggest:
    - Why it matters for this role
    - How to acquire or credibly position existing experience to address it
-   If there are 3+ missing required skills, prioritize the top 3 most critical.
-   For ALL mismatches, warnings, or red flags noted above (seniority level, education field/degree, skill gaps, qualifications), provide direct and honest assessment with specific recommendations.
+   - If there are 3+ missing required skills, prioritize the top 3 most critical.
+   - For ALL mismatches, warnings, or red flags noted above (seniority level, education field/degree, skill gaps, qualifications), provide direct and honest assessment with specific recommendations.
+   - If certain information from the resume was not extracted, note that as a critical issue and recommend how to fix it.
+   - If certain information from the job description was not extracted, don't include that in the gap analysis since it's not the candidate's fault, but you can note it as a potential risk factor.
 
-2. **Strengths of your current resume**
+**Strengths of your current resume**
    Reference the specific matched skills and qualifications from above. Select 2-3 that are most relevant to this role. Explain how each one differentiates the candidate.
    **CRITICAL: When mentioning any matched skill, reference the source (company, project, section) from the SOURCE ATTRIBUTION FOR MATCHED SKILLS section. This ensures you're attributing skills to the correct source.**
    If you reference work experience, you must mention the specific company name from the attribution, and only reference companies identified in the resume's Work Experience section. Do NOT mention any companies, non-profit organizations, or leadership positions that are not listed above when discussing work experience.
    Talk about what the resume did well in showcasing these strengths.
    
-3. **Gap-Bridging Strategy - How to Use Your Strengths to Reach For Missing Skills**
+**Gap-Bridging Strategy - How to Use Your Strengths to Reach For Missing Skills**
    Your matched skills are foundational. For the most critical missing skills:
    - Identify which of your matched skills are most transferable to learning the missing ones
    - Suggest specific projects, certifications, or examples from your resume that can bridge the gap
-   - Propose concrete actions (how to learn, what to highlight in application materials, conversation points for interviews)
-"""
+   - Propose concrete actions (how to learn, what to highlight in application materials, conversation points for interviews). Be creative but realistic.
+
+**General Suggestions for Resume Improvement**
+   If special cases were identified (weak action verbs, missing metrics, repetitive verbs, over/underqualification, education mismatch), provide specific recommendations for how to address them in the resume. Include examples of how to rewrite bullets or reframe experience to better align with the job description.
+   If no special cases were identified, provide 1-2 general suggestions for improving the resume's impact and clarity.
+
+**Conclusion**
+    Write a 1-2 sentence closing summary that encourages the candidate to take action and emphasizes that while there are gaps, they can be addressed with the right strategy.
+   """
     
-    # DEBUG: Print the full prompt being sent to agent
-    print("\n" + "="*80)
-    print("[DEBUG] FINAL PROMPT BEING SENT TO AGENT:")
-    print("="*80)
-    print(prompt.strip())
-    print("="*80 + "\n")
+    #logger.debug("Generated resume feedback prompt for job title: %s", job_title)
     
     return prompt.strip()
 
@@ -470,11 +497,25 @@ def run_agent_analysis(prompt: str, rag_instance: 'RAGSystem' | None = None) -> 
 
     """Run agent analysis with given prompt and RAG instance, return response."""
     agent = create_job_agent(rag_instance=rag_instance)
-    run_config = {"configurable": {"thread_id": "job-app-helper-session"}}
-    
-    result = agent.invoke(
-        {"messages": [HumanMessage(content=prompt)]},
-        config=run_config,
-    )
-    
-    return result["messages"][-1].content
+    try:
+        result = agent.invoke(
+            {"messages": [HumanMessage(content=prompt)]},
+        )
+        return result["messages"][-1].content
+    except openai.RateLimitError:
+        return "Too many requests right now. Please try again in 1 minute."
+    except openai.APITimeoutError:
+        return "AI feedback is taking too long right now. Please try again in a moment."
+    except openai.AuthenticationError:
+        # Server misconfig — user can't fix this, but they shouldn't see a scary stack trace
+        logger.error("OpenAI authentication failed — check API key")
+        return "AI feedback is temporarily unavailable. Please try again later."
+    except openai.APIConnectionError:
+        return "Could not reach the AI service. Please check your connection and try again."
+    except openai.APIError:
+        logger.error("OpenAI API error during agent analysis")
+        return "AI feedback is temporarily unavailable. Please try again later."
+    except Exception:
+        logger.error("Unexpected error in agent analysis", exc_info=DEBUG_PRIVACY_LOGS)
+        return "An unexpected error occurred. Please try again later."
+

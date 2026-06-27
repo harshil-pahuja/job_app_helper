@@ -5,6 +5,7 @@ Handles text parsing, entity extraction, skill matching, etc.
 import re
 import os
 import json
+import logging
 from pathlib import Path
 from langchain_openai import ChatOpenAI
 import spacy # type: ignore
@@ -16,6 +17,7 @@ from langchain.chat_models import init_chat_model  # type: ignore
 load_dotenv()
 
 nlp = spacy.load("en_core_web_sm")
+logger = logging.getLogger(__name__)
 
 # Load sample text from file
 sample_file = Path(__file__).parent.parent / "tests" / "sample_company.txt"
@@ -618,9 +620,10 @@ def token_overlap_score(a, b):
     inter = ta & tb
     denom = max(len(ta), len(tb))
     return len(inter) / denom
-#print("Token overlap score example:", token_overlap_score("python programming", "programming in python")) (2/3)
-#print("Token overlap score example 2:", token_overlap_score("google cloud", "google cloud platform"))  (2/3)
-#print("Token overlap score example 3:", token_overlap_score("java", "javascript"))  (0/2)
+# token overlap scoring examples retained as reference:
+# token_overlap_score("python programming", "programming in python") -> 2/3
+# token_overlap_score("google cloud", "google cloud platform") -> 2/3
+# token_overlap_score("java", "javascript") -> 0/2
 
 def fuzzy_ratio(a, b):
     """Return a fuzzy similarity ratio between two strings using SequenceMatcher."""
@@ -1056,9 +1059,9 @@ Example: {"required_skills": ["Python", "AWS"], "preferred_skills": ["Kubernetes
                     cleaned_skills.append(canonicalize_skill(skill))
             
             return sorted(list(set(cleaned_skills)))
-    except Exception as e:
+    except Exception:
         # Silently fall back to regex extraction
-        print(f"[DEBUG] LLM skill extraction failed: {e}. Falling back to regex extraction.")
+        logger.warning("LLM skill extraction failed; falling back to regex extraction")
     
     # Fallback to regex-based extraction
     return extract_skills(text)
@@ -1549,67 +1552,106 @@ def match_education(job_required_education, job_preferred_education, resume_educ
     
     # Normalize degree names for matching
     degree_groups = {
-        'bachelors': {'bachelor\'s', 'b.s.', 'b.a.', 'bs', 'ba'},
-        'masters': {'master\'s', 'm.s.', 'm.a.', 'ms', 'ma', 'm.b.a.', 'mba'},
-        'phd': {'ph.d.', 'phd', 'doctorate'},
-        'associates': {'associate\'s', 'a.s.', 'a.a.', 'as', 'aa'},
+        'high_school': {'high school', 'diploma', 'ged'},
+        'associates': {'associate', 'associate\'s', 'a.s.', 'a.a.', 'as', 'aa'},
+        'bachelors': {'bachelor', 'bachelor\'s', 'b.s.', 'b.a.', 'bs', 'ba'},
+        'masters': {'master', 'master\'s', 'm.s.', 'm.a.', 'ms', 'ma', 'm.b.a.', 'mba'},
+        'phd': {'ph.d.', 'phd', 'doctorate', 'doctoral'},
+    }
+
+    degree_rank = {
+        'high_school': 0,
+        'associates': 1,
+        'bachelors': 2,
+        'masters': 3,
+        'phd': 4,
     }
     
     def normalize_degree(degree):
         """Map a degree to its general category."""
-        d = degree.lower().strip()
-        for category, variants in degree_groups.items():
-            if d in variants or any(v in d for v in variants):
-                return category
+        d = degree.lower().replace("’", "'").strip().strip(".,;/")
+        d = re.sub(r'\s+', ' ', d)
+
+        if re.search(r"\b(ph\.?\s*d\.?|phd|doctorate|doctoral)\b", d):
+            return 'phd'
+        if re.search(r"\b(m\.?\s*b\.?\s*a\.?|m\.?\s*s\.?|m\.?\s*a\.?|masters?|master's)\b", d):
+            return 'masters'
+        if re.search(r"\b(b\.?\s*s\.?|b\.?\s*a\.?|bachelors?|bachelor's)\b", d):
+            return 'bachelors'
+        if re.search(r"\b(a\.?\s*s\.?|a\.?\s*a\.?|associates?|associate's)\b", d):
+            return 'associates'
+        if re.search(r"\b(high school|diploma|ged)\b", d):
+            return 'high_school'
         return d
+
+    def degree_match_by_level(job_degrees, resume_degrees):
+        """Return True when the resume has at least the minimum required degree level.
+
+        If a posting says "Master's or PhD degree", a Bachelor's resume should not
+        match. If a posting says "Bachelor's degree", a Master's resume should match.
+        Generic "degree" only means any degree when no specific level is present.
+        """
+        job_normalized = {normalize_degree(d) for d in job_degrees}
+        resume_normalized = {normalize_degree(d) for d in resume_degrees}
+
+        job_levels = [
+            degree_rank[d]
+            for d in job_normalized
+            if d in degree_rank
+        ]
+        resume_levels = [
+            degree_rank[d]
+            for d in resume_normalized
+            if d in degree_rank
+        ]
+
+        if not job_levels:
+            return (
+                bool(resume_degrees) and 'degree' in job_normalized,
+                job_normalized,
+                resume_normalized,
+                'Generic degree requirement matched by any resume degree',
+            )
+
+        if not resume_levels:
+            return False, job_normalized, resume_normalized, None
+
+        return (
+            max(resume_levels) >= min(job_levels),
+            job_normalized,
+            resume_normalized,
+            None,
+        )
     
     # Check required degrees
     if job_required_education:
-        # Check if a generic "degree" is mentioned (matches any degree type)
-        has_generic_degree = any(d.lower().strip() == 'degree' for d in job_required_education)
-        
-        if has_generic_degree and resume_education:
-            # If job just says "degree" without specifying type, any degree on resume satisfies it
-            result['required_degree_matched'] = True
-            result['details']['required'] = {
-                'job_normalized': ['any_degree'],
-                'resume_normalized': list({normalize_degree(d) for d in resume_education}),
-                'match': True,
-                'note': 'Generic degree requirement matched by any resume degree'
-            }
-        else:
-            job_normalized = {normalize_degree(d) for d in job_required_education}
-            resume_normalized = {normalize_degree(d) for d in resume_education}
-            result['required_degree_matched'] = bool(job_normalized & resume_normalized)
-            result['details']['required'] = {
-                'job_normalized': list(job_normalized),
-                'resume_normalized': list(resume_normalized),
-                'match': result['required_degree_matched']
-            }
+        matched, job_normalized, resume_normalized, note = degree_match_by_level(
+            job_required_education,
+            resume_education,
+        )
+        result['required_degree_matched'] = matched
+        result['details']['required'] = {
+            'job_normalized': list(job_normalized),
+            'resume_normalized': list(resume_normalized),
+            'match': matched,
+        }
+        if note:
+            result['details']['required']['note'] = note
     
     # Check preferred degrees
     if job_preferred_education:
-        # Check if a generic "degree" is mentioned (matches any degree type)
-        has_generic_degree = any(d.lower().strip() == 'degree' for d in job_preferred_education)
-        
-        if has_generic_degree and resume_education:
-            # If job just says "degree" without specifying type, any degree on resume satisfies it
-            result['preferred_degree_matched'] = True
-            result['details']['preferred'] = {
-                'job_normalized': ['any_degree'],
-                'resume_normalized': list({normalize_degree(d) for d in resume_education}),
-                'match': True,
-                'note': 'Generic degree preference matched by any resume degree'
-            }
-        else:
-            job_normalized = {normalize_degree(d) for d in job_preferred_education}
-            resume_normalized = {normalize_degree(d) for d in resume_education}
-            result['preferred_degree_matched'] = bool(job_normalized & resume_normalized)
-            result['details']['preferred'] = {
-                'job_normalized': list(job_normalized),
-                'resume_normalized': list(resume_normalized),
-                'match': result['preferred_degree_matched']
-            }
+        matched, job_normalized, resume_normalized, note = degree_match_by_level(
+            job_preferred_education,
+            resume_education,
+        )
+        result['preferred_degree_matched'] = matched
+        result['details']['preferred'] = {
+            'job_normalized': list(job_normalized),
+            'resume_normalized': list(resume_normalized),
+            'match': matched,
+        }
+        if note:
+            result['details']['preferred']['note'] = note
     
     # Check field/major matching (if we have both job and resume fields)
     if resume_education_fields:
@@ -2380,145 +2422,8 @@ def calculate_skill_match_score(job_required_skills, job_preferred_skills, resum
 
 
 def main():
-    """Debug skill matching between job description and resume.
-    
-    Compares extracted skills to identify matches and mismatches.
-    """
-    
-    # DEBUG: Extract skills from specific sections
-    print("\n" + "="*80)
-    print("[DEBUG] COMPANY-SPECIFIC SKILL EXTRACTION")
-    print("="*80)
-    
-    # Test parsing skills from Dream Team Engineering section
-    dream_team_text = """Software Engineer | Dream Team Engineering | January 2024 - April 2026
-    • Converted an application schema into a PostgreSQL database using Drizzle, creating tables, foreign keys, and indexes
-    • Streamlined management of recruitment cycles with create, read, update, delete operations across a Next.js panel
-    • Improved administrator panel visibility by integrating application metadata and user records with live database content"""
-    
-    dream_team_skills = extract_skills(dream_team_text)
-    print(f"[DEBUG] Dream Team Engineering section skills: {dream_team_skills}")
-    
-    # Test parsing skills from L3Harris section
-    l3harris_text = """Software Engineering Intern | L3Harris Technologies | May 2025 - August 2025
-    • Developed scalable APIs with FastAPI to retrieve and process data from multiple data sources
-    • Implemented secure user authentication and authorization workflows to protect user data
-    • Integrated application metadata with live database content, enhancing system usability"""
-    
-    l3harris_skills = extract_skills(l3harris_text)
-    print(f"[DEBUG] L3Harris Technologies section skills: {l3harris_skills}")
-    
-    # Test parsing from skills section
-    skills_section = """Languages: Python, JavaScript, Java, MATLAB, C++, SQL
-    Tools and Frameworks: FastAPI, React.js, Express.js, Next.js, TensorFlow, Beyond Compare, Git, Bitbucket, Tera Term"""
-    
-    skills_section_extract = extract_skills(skills_section)
-    print(f"[DEBUG] Skills section extracted: {skills_section_extract}")
-    
-    print("="*80 + "\n")
-    import sys
-    from pathlib import Path
-    
-    print("="*80)
-    print("SKILL MATCHING DEBUG - JOB vs RESUME")
-    print("="*80)
-    
-    # Get paths
-    job_path = "tests/sample_company.txt"
-    resume_path = "tests/harshil_resume_extracted.txt"
-    
-    if len(sys.argv) > 1:
-        job_path = sys.argv[1]
-    if len(sys.argv) > 2:
-        resume_path = sys.argv[2]
-    
-    # Check if files exist
-    if not Path(job_path).exists():
-        print(f"[ERROR] Job file not found: {job_path}")
-        return
-    if not Path(resume_path).exists():
-        print(f"[ERROR] Resume file not found: {resume_path}")
-        return
-    
-    # Load and extract skills
-    print(f"\n[JOB] Loading: {job_path}")
-    with open(job_path, "r", encoding="utf-8") as f:
-        job_text = f.read()
-    job_skills = extract_skills(job_text)
-    
-    print(f"[RESUME] Loading: {resume_path}")
-    with open(resume_path, "r", encoding="utf-8") as f:
-        resume_text = f.read()
-    resume_skills = extract_skills(resume_text)
-    
-    # Convert to lowercase sets for matching
-    job_skills_lower = set(s.lower().strip() for s in job_skills)
-    resume_skills_lower = set(s.lower().strip() for s in resume_skills)
-    
-    # Find matches and mismatches
-    matched = job_skills_lower & resume_skills_lower
-    not_in_resume = job_skills_lower - resume_skills_lower
-    extra_in_resume = resume_skills_lower - job_skills_lower
-    
-    # Display results
-    print("\n" + "="*80)
-    print(f"JOB SKILLS EXTRACTED ({len(job_skills_lower)} total):")
-    print("-"*80)
-    for i, skill in enumerate(sorted(job_skills_lower), 1):
-        in_resume = "[YES]" if skill in resume_skills_lower else "[NO] "
-        print(f"{i:2}. {skill:45} | {in_resume}")
-    
-    print("\n" + "="*80)
-    print(f"RESUME SKILLS EXTRACTED ({len(resume_skills_lower)} total):")
-    print("-"*80)
-    for i, skill in enumerate(sorted(resume_skills_lower), 1):
-        in_job = "[REQ]" if skill in job_skills_lower else "[OPT]"
-        print(f"{i:2}. {skill:45} | {in_job}")
-    
-    # Summary
-    print("\n" + "="*80)
-    print("MATCHING SUMMARY:")
-    print("-"*80)
-    print(f"[MATCH] Matched Skills ({len(matched)}):")
-    for skill in sorted(matched):
-        print(f"  * {skill}")
-    
-    print(f"\n[MISSING] Missing from Resume ({len(not_in_resume)}):")
-    for skill in sorted(not_in_resume):
-        print(f"  * {skill}")
-    
-    print(f"\n[EXTRA] Extra in Resume ({len(extra_in_resume)}):")
-    extra_list = sorted(extra_in_resume)[:10]
-    for skill in extra_list:
-        print(f"  * {skill}")
-    if len(extra_in_resume) > 10:
-        print(f"  ... and {len(extra_in_resume) - 10} more")
-    
-    # Special check for C++
-    print("\n" + "="*80)
-    print("SPECIAL DEBUG - C++ MATCHING:")
-    print("-"*80)
-    cpp_in_job = "c++" in job_skills_lower
-    cpp_in_resume = "c++" in resume_skills_lower
-    print(f"C++ in job description: {'YES' if cpp_in_job else 'NO'}")
-    print(f"C++ in resume: {'YES' if cpp_in_resume else 'NO'}")
-    
-    if cpp_in_job and not cpp_in_resume:
-        print(f"\n[WARNING] C++ is REQUIRED but MISSING from resume!")
-        cpp_variants_job = [s for s in job_skills_lower if 'c' in s and '+' in s]
-        cpp_variants_resume = [s for s in resume_skills_lower if 'c' in s]
-        if cpp_variants_job:
-            print(f"   Job has C++ variants: {cpp_variants_job}")
-        if cpp_variants_resume:
-            print(f"   Resume has C variants: {cpp_variants_resume}")
-    elif cpp_in_job and cpp_in_resume:
-        print(f"\n[SUCCESS] C++ MATCHED successfully!")
-    
-    # Overall match percentage
-    match_pct = (len(matched) / len(job_skills_lower) * 100) if job_skills_lower else 0
-    print(f"\n" + "="*80)
-    print(f"MATCH RATE: {len(matched)}/{len(job_skills_lower)} = {match_pct:.1f}%")
-    print("="*80)
+    """Placeholder CLI entrypoint for local manual checks."""
+    logger.info("nlp_processor module loaded. No standalone debug action configured.")
 
 
 def map_skills_to_source(resume_text, resume_skills):
@@ -2623,25 +2528,23 @@ def map_skills_to_source(resume_text, resume_skills):
     if current_section_name:
         sections.append((current_section_start, len(lines), current_section_name, 'section'))
     
-    # Extract content for each section and extract skills
+    # Attribute already-extracted resume skills to sections without another LLM
+    # call per section. This keeps one analysis from creating a burst of API
+    # requests just to build source labels.
     for start, end, section_name, section_type in sections:
         section_lines = lines[start:end]
         section_text = '\n'.join(section_lines)
+        section_text_normalized = canonicalize_skill(section_text)
         
         if not section_text.strip():
             skills_by_source[section_name] = []
             continue
         
-        # Extract skills from this section
-        source_skills = extract_skills_with_llm(section_text, context='resume')
-        
-        # Normalize to lowercase for comparison
-        source_skills_lower = set(s.lower() for s in source_skills)
-        
-        # Find which resume skills appear in this source
         matched_skills = []
         for resume_skill in resume_skills:
-            if resume_skill.lower() in source_skills_lower:
+            normalized_skill = canonicalize_skill(resume_skill)
+            skill_pattern = r'(?<![\w+#.])' + re.escape(normalized_skill) + r'(?![\w+#.])'
+            if re.search(skill_pattern, section_text_normalized):
                 matched_skills.append(resume_skill)
         
         skills_by_source[section_name] = matched_skills

@@ -199,7 +199,6 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                             resume_skills = extract_skills_with_llm(resume_text, context='resume')
                         except Exception as e:
                             # Fallback to direct extraction if LLM fails
-                            print(f"[DEBUG] LLM resume skill extraction failed: {e}")
                             resume_skills = extract_resume_skills(resume_text=resume_text)
                     else:
                         resume_skills = []
@@ -213,19 +212,6 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     match = calculate_skill_match_score(req_for_match, [], resume_skills)
                     st.write(f"**Skill coverage:** {match['required_score']:.0%}")
                     st.write("**Matched skills:** " + (", ".join(match['required_matches']) if match['required_matches'] else "None"))
-                    
-                    # DEBUG: Show what resume skills are in the sample
-                    print("\n" + "="*80)
-                    print("[DEBUG] SKILL MATCHING BREAKDOWN")
-                    print("="*80)
-                    print(f"[DEBUG] Resume skills extracted (full list): {resume_skills}")
-                    print(f"[DEBUG] Required job skills to match: {req_for_match}")
-                    print(f"[DEBUG] Matched skills: {match['required_matches']}")
-                    if match['details']['required']['unmatched']:
-                        unmatched_list = [u['job_skill'] for u in match['details']['required']['unmatched']]
-                        print(f"[DEBUG] Unmatched skills: {unmatched_list}")
-                    print(f"[DEBUG] Resume skills sample in extraction: {match['details']['required'].get('resume_skills_sample', [])}")
-                    print("="*80 + "\n")
 
                     # Extract and match education
                     st.divider()
@@ -414,42 +400,11 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                         'qualifications_job_preferred': []
                     }
                     
-                    # DEBUG: Print full extraction_results
-                    print("\n" + "="*80)
-                    print("[DEBUG] Full extraction_results being passed to agent:")
-                    print("="*80)
-                    import json
-                    print(json.dumps(extraction_results, indent=2, default=str))
-                    print("="*80 + "\n")
-                    
                     # Get job title from first line of job posting if available
                     job_title = job_description.split('\n')[0].strip() if job_description else "Position"
                     
                     # Generate structured prompt with extraction results and resume text for bullet rewrites
                     feedback_prompt = generate_resume_feedback_prompt(job_title, job_description, extraction_results, resume_text=resume_text)
-                    
-                    # DEBUG: Print skills_by_source and relevant sections
-                    print("\n" + "="*80)
-                    print("[DEBUG] SKILLS-BY-SOURCE MAPPING:")
-                    print("="*80)
-                    skills_by_source = extraction_results.get('skills_by_source', {})
-                    print(json.dumps(skills_by_source, indent=2, default=str))
-                    print("="*80 + "\n")
-                    
-                    # DEBUG: Extract and print just the SOURCE ATTRIBUTION section from prompt
-                    if "SOURCE ATTRIBUTION FOR MATCHED SKILLS" in feedback_prompt:
-                        start = feedback_prompt.find("SOURCE ATTRIBUTION FOR MATCHED SKILLS")
-                        end = feedback_prompt.find("\n**", start + 1)
-                        if end == -1:
-                            end = feedback_prompt.find("**EDUCATION", start)
-                        source_section = feedback_prompt[start:end] if end != -1 else feedback_prompt[start:]
-                        print("\n" + "="*80)
-                        print("[DEBUG] SOURCE ATTRIBUTION SECTION IN PROMPT:")
-                        print("="*80)
-                        print(source_section)
-                        print("="*80 + "\n")
-                    else:
-                        print("\n[WARNING] SOURCE ATTRIBUTION section NOT FOUND in prompt!\n")
                     
                     # Run agent with structured feedback
                     st.subheader("Resume Feedback")

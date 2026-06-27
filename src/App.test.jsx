@@ -28,6 +28,19 @@ function makeAnalyzeResponse(overrides = {}) {
   };
 }
 
+function fillRequiredFormFields() {
+  const resume = new File(['resume text'], 'resume.pdf', { type: 'application/pdf' });
+
+  fireEvent.change(screen.getByLabelText(/Resume/i), {
+    target: { files: [resume] },
+  });
+
+  fireEvent.change(
+    screen.getByPlaceholderText('Paste the job title, description, and requirements...'),
+    { target: { value: 'Some job description text' } }
+  );
+}
+
 describe('App error handling', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -42,11 +55,7 @@ describe('App error handling', () => {
 
     render(<App />);
 
-    fireEvent.change(
-      screen.getByPlaceholderText('Paste the job title, description, and requirements...'),
-      { target: { value: 'Some job description text' } }
-    );
-
+    fillRequiredFormFields();
     fireEvent.click(screen.getByRole('button', { name: 'Analyze' }));
 
     await screen.findByText('Provide a resume, a job description, or both.');
@@ -56,19 +65,15 @@ describe('App error handling', () => {
     vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: false,
       status: 429,
-      json: async () => ({ error: 'Rate limit exceeded: 10 per hour' }),
+      json: async () => ({ error: 'Rate limit exceeded: 10 per hour. Please try again later.' }),
     });
 
     render(<App />);
 
-    fireEvent.change(
-      screen.getByPlaceholderText('Paste the job title, description, and requirements...'),
-      { target: { value: 'Some job description text' } }
-    );
-
+    fillRequiredFormFields();
     fireEvent.click(screen.getByRole('button', { name: 'Analyze' }));
 
-    await screen.findByText('Rate limit exceeded: 10 per hour');
+    await screen.findByText('Rate limit exceeded: 10 per hour. Please try again later.');
   });
 
   test('shows timeout message for aborted request', async () => {
@@ -79,11 +84,7 @@ describe('App error handling', () => {
 
     render(<App />);
 
-    fireEvent.change(
-      screen.getByPlaceholderText('Paste the job title, description, and requirements...'),
-      { target: { value: 'Some job description text' } }
-    );
-
+    fillRequiredFormFields();
     fireEvent.click(screen.getByRole('button', { name: 'Analyze' }));
 
     await screen.findByText('Request timed out. Please try again.');
@@ -101,11 +102,7 @@ describe('App error handling', () => {
 
     render(<App />);
 
-    fireEvent.change(
-      screen.getByPlaceholderText('Paste the job title, description, and requirements...'),
-      { target: { value: 'Some job description text' } }
-    );
-
+    fillRequiredFormFields();
     fireEvent.click(screen.getByRole('button', { name: 'Analyze' }));
 
     await waitFor(() => {
