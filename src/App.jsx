@@ -101,7 +101,7 @@ function App() {
           along with actionable tips to improve your resume!
         </p>
         <p>
-          Do not upload sensitive information you do not want AI to process.
+          Do not upload sensitive information you do not want AI to access.
         </p>
       </header>
 

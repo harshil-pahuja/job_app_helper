@@ -134,6 +134,21 @@ name_patterns = [
     r"\b[A-Z][a-z]+(?:'[A-Z][a-z]+)? [A-Z][a-z]+(?:'[A-Z][a-z]+)?\b",
 ]
 
+#Check whether the user actually uploaded a valid job description and not some slop
+def validate_job_description_text(text: str) -> None:
+    normalized = text.lower()
+
+    has_required_signal = "required" in normalized or "requirements" in normalized or "minimum" in normalized or "must have" in normalized or "basic" in normalized
+    has_preferred_signal = "preferred" in normalized or "nice to have" in normalized
+    has_responsibilities_signal = "responsibilities" in normalized or "what you will do" in normalized
+    has_summary_signal = "summary" in normalized or "overview" in normalized or "about the role" in normalized
+
+    if not (has_required_signal or has_preferred_signal or has_responsibilities_signal or has_summary_signal):
+        raise HTTPException(
+            status_code=400,
+            detail="Pasted text does not look like a job description. Please upload a job description with sections for summary, required and/or preferred qualifications, and try again."
+        )
+
 # Check whether the user actually uploaded a valid resume and not some other document.
 def validate_resume_text(text: str) -> None:
     normalized = text.lower()
@@ -392,10 +407,32 @@ async def analyze(
 ):
     """Run the full resume/job analysis pipeline and return JSON.
 
-    Either `resume` or `job_description` must be provided.
+    Both a `resume` and `job_description` must be provided.
     """
-    if not job_description and resume is None:
-        raise HTTPException(status_code=400, detail="Provide a resume, a job description, or both.")
+    resume_error = None
+    job_error = None
+
+    try:
+        resume_text = _extract_resume_text(resume)
+    except HTTPException as exc:
+        resume_error = exc.detail
+
+    try:
+        validate_job_description_text(job_description)
+    except HTTPException as exc:
+        job_error = exc.detail
+
+    if resume_error and job_error:
+        raise HTTPException(
+            status_code=400,
+            detail="Both your resume and job description are invalid. Please upload a valid resume and paste a valid job description."
+        )
+
+    if resume_error:
+        raise HTTPException(status_code=400, detail=resume_error)
+
+    if job_error:
+        raise HTTPException(status_code=400, detail=job_error)
 
     MAX_JD_CHARS = 15_000
     if len(job_description) > MAX_JD_CHARS:
@@ -404,7 +441,9 @@ async def analyze(
             detail=f"Job description is too long ({len(job_description):,} characters). Please shorten it to under {MAX_JD_CHARS:,} characters.",
         )
     # ── Job-side extraction ────────────────────────────────────────────────
+    validate_job_description_text(job_description)
     if job_description:
+        #job_description_text = validate_job_description_text(job_description)
         job_required, job_preferred = extract_qualifications(job_description)
         job_skills = extract_skills_with_llm(job_description, context="job_posting")
         job_required_education = extract_education_with_llm(job_description)
