@@ -91,7 +91,6 @@ app.add_middleware(
 
 FIELD_CATEGORIES = {
     "stem": {
-        "stem",
         "computer science",
         "computer engineering",
         "software engineering",
@@ -105,7 +104,6 @@ FIELD_CATEGORIES = {
         "engineering",
     },
     "humanities": {
-        "humanities",
         "english",
         "history",
         "philosophy",
@@ -114,7 +112,6 @@ FIELD_CATEGORIES = {
         "classics",
     },
     "arts": {
-        "arts",
         "art",
         "design",
         "fine arts",
@@ -132,11 +129,8 @@ FIELD_CATEGORIES = {
         "management",
     },
     "quantitative": {
-        "quantitative",
         "mathematics",
         "statistics",
-        "data science",
-        "computer science",
         "economics",
         "physics",
     },
