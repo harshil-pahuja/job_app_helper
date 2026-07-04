@@ -201,7 +201,11 @@ def generate_resume_feedback_prompt(job_title: str, job_description: str, extrac
     
     # Extract company names from resume for context
     companies = extract_work_experience_companies(resume_text)
-    company_context = f"companies: {', '.join(companies)}" if companies else "no companies identified"
+    company_context = (
+    f"identified employer names: {', '.join(companies)}"
+    if companies
+    else "no employer names were reliably extracted"
+)
     
     skills_context = ""
     if skills_by_source:
@@ -214,9 +218,10 @@ def generate_resume_feedback_prompt(job_title: str, job_description: str, extrac
     prompt = f"""
 Please provide personalized resume feedback for a job application to: {job_title}
 
-IMPORTANT: The candidate's WORK EXPERIENCE companies are: {', '.join(companies) if companies else 'Not identified'}
+IMPORTANT: {f"The candidate's identified WORK EXPERIENCE employers are: {', '.join(companies)}." if companies else "No employer names were reliably extracted from the resume."}
 Do NOT mention any companies, non-profit organizations, or leadership positions that are not listed above when discussing work experience.
 Only reference the actual employers listed above.
+If no employer names were reliably extracted, do NOT assume the candidate lacks work experience. The extraction issue could just be based on the resume format. Use projects, skills, education, and resume bullets as evidence instead.
 
 **CANDIDATE WORK EXPERIENCE CONTEXT:**
 Work experience at: {company_context}{skills_context}
