@@ -1452,6 +1452,14 @@ Valid academic fields (extract ONLY if in degree statement):
 - Chemistry, Physics, Biology, Psychology, Mathematics, Statistics
 - And other legitimate academic majors
 
+Broad requirements:
+- "A Bachelor's degree in a STEM field" → do NOT extract "STEM" as a field but instead consider any STEM field to qualify (ex. Computer Science, Mechanical Engineering, etc.).
+- "A Master's degree in a STEM field" → do NOT extract "STEM" as a field but instead consider any STEM field to qualify (ex. Computer Science, Mechanical Engineering, etc.).
+- "A Bachelor's degree in a related field" → do NOT extract "related field" as a field but instead consider any related field based on specific job posting to qualify.
+- "A Master's degree in a related field" → do NOT extract "related field" as a field but instead consider any related field based on specific job posting to qualify.
+- "A Bachelor's degree in a humanities field" → do NOT extract "humanities" as a field but instead consider any humanities field to qualify (ex. History, Philosophy, Literature, etc.).
+- "A Master's degree in a humanities field" → do NOT extract "humanities" as a field but instead consider any humanities field to qualify (ex. History, Philosophy, Literature, etc.).
+
 GOLDEN RULE: Look for the pattern "[Degree Type] in/of/with [Field Name]"
 - If you see this pattern → EXTRACT the field
 - If you just see the term in job duties → IGNORE it

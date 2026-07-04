@@ -89,6 +89,72 @@ app.add_middleware(
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+FIELD_CATEGORIES = {
+    "stem": {
+        "stem",
+        "computer science",
+        "computer engineering",
+        "software engineering",
+        "data science",
+        "information technology",
+        "mathematics",
+        "statistics",
+        "physics",
+        "chemistry",
+        "biology",
+        "engineering",
+    },
+    "humanities": {
+        "humanities",
+        "english",
+        "history",
+        "philosophy",
+        "literature",
+        "linguistics",
+        "classics",
+    },
+    "arts": {
+        "arts",
+        "art",
+        "design",
+        "fine arts",
+        "graphic design",
+        "music",
+        "theater",
+        "film",
+    },
+    "business": {
+        "business",
+        "finance",
+        "accounting",
+        "economics",
+        "marketing",
+        "management",
+    },
+    "quantitative": {
+        "quantitative",
+        "mathematics",
+        "statistics",
+        "data science",
+        "computer science",
+        "economics",
+        "physics",
+    },
+}
+
+
+def _field_category(field: str) -> str | None:
+    normalized = field.lower().strip()
+
+    for category, values in FIELD_CATEGORIES.items():
+        if category in normalized:
+            return category
+
+        if any(value in normalized for value in values):
+            return category
+
+    return None
+
 def _check_field_match(job_fields, resume_fields):
     """Mirror of streamlit_app.check_field_match.
 
@@ -98,6 +164,12 @@ def _check_field_match(job_fields, resume_fields):
         return True, None, None
     if not resume_fields:
         return False, None, None
+    
+    for job_field in job_fields:
+        for resume_field in resume_fields:
+            if _field_category(job_field) and _field_category(resume_field):
+                if _field_category(job_field) == _field_category(resume_field):
+                    return True, job_field, resume_field
 
     for job_field in job_fields:
         job_words = set(job_field.lower().split())
@@ -110,6 +182,7 @@ def _check_field_match(job_fields, resume_fields):
                     return True, job_field, resume_field
             elif max_len and len(overlap) / max_len >= 0.5:
                 return True, job_field, resume_field
+
 
     return False, None, None
 
@@ -306,13 +379,19 @@ def _extract_resume_text(upload: UploadFile) -> str:
 
     Supports PDF (via pypdf) and Word documents (via doc or docx). Raises HTTPException on failure.
     """
+    #Extra check to make sure nothing has consumed the file pointer before we read it. This can happen if the file is read in a previous step, e.g. for logging or validation.
+    try:
+        upload.file.seek(0)
+    except Exception:
+        pass
+
     if (len(raw := upload.file.read()) == 0):
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
-    
+        raise HTTPException(status_code=400, detail="Uploaded resume file is empty.")
+
     if (len(raw) > 5 * 1024 * 1024):
         raise HTTPException(
             status_code=400,
-            detail="Uploaded file is too large. Please upload a file smaller than 5 MB.",
+            detail="Uploaded resume file is too large. Please upload a file smaller than 5 MB.",
         )
 
     is_pdf = (
@@ -336,7 +415,7 @@ def _extract_resume_text(upload: UploadFile) -> str:
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
-                detail=f"Could not read PDF: {exc}. Try re-saving the PDF and uploading again.",
+                detail=f"Could not read resume PDF: {exc}. Try re-saving the PDF and uploading again.",
             )
     elif is_word:
         try:
@@ -345,7 +424,7 @@ def _extract_resume_text(upload: UploadFile) -> str:
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
-                detail=f"Could not read Word document: {exc}. Try re-saving the document and uploading again.",
+                detail=f"Could not read resume Word document: {exc}. Try re-saving the document and uploading again.",
             )
     else:
         text = raw.decode("utf-8", errors="ignore").strip()
@@ -368,7 +447,7 @@ def _extract_resume_text(upload: UploadFile) -> str:
         raise HTTPException(
             status_code=400,
             detail=(
-                "The system could not read this PDF because it is too long. Please re-save it as a .docx file "
+                "The system could not read this resume PDF because it is too long. Please re-save it as a .docx file "
                 "or split it into smaller sections and try again."
             ),
         )
@@ -409,6 +488,7 @@ async def analyze(
 
     Both a `resume` and `job_description` must be provided.
     """
+    resume_text = ""
     resume_error = None
     job_error = None
 
@@ -463,9 +543,6 @@ async def analyze(
         job_seniority = None
 
     # ── Resume-side extraction ─────────────────────────────────────────────
-    resume_text = ""
-    if resume is not None:
-        resume_text = _extract_resume_text(resume)
 
     rag = None
     if resume_text:

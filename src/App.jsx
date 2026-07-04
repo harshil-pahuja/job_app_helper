@@ -118,7 +118,7 @@ function App() {
         </label>
 
         <label className="field-label">
-          Job Description
+          Job Description (For maximum accuracy, include the job title, description, and requirements)
           <textarea
             value={jobDescription}
             onChange={(e) => setJobDescription(e.target.value)}

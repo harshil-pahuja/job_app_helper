@@ -468,6 +468,7 @@ Based on this analysis, please provide feedback ONLY in the following structured
    - For ALL mismatches, warnings, or red flags noted above (seniority level, education field/degree, skill gaps, qualifications), provide direct and honest assessment with specific recommendations.
    - If certain information from the resume was not extracted, note that as a critical issue and recommend how to fix it.
    - If certain information from the job description was not extracted, don't include that in the gap analysis since it's not the candidate's fault, but you can note it as a potential risk factor.
+   - When the job requires a broad education field category such as STEM, technical, engineering, quantitative, humanities, arts, business, or a related field, do NOT treat a specific qualifying major as a mismatch. For example, Computer Science satisfies STEM/technical/quantitative requirements.
 
 **Strengths of your current resume**
    Reference the specific matched skills and qualifications from above. Select 2-3 that are most relevant to this role. Explain how each one differentiates the candidate.
