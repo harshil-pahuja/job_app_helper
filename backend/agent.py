@@ -3,6 +3,8 @@ LangChain agent logic for resume and job analysis.
 Handles tool calling, agentic workflows, and response generation.
 """
 from __future__ import annotations
+from http.client import HTTPException
+import json
 from logging import getLogger
 import os
 from pathlib import Path
@@ -111,12 +113,13 @@ def extract_work_experience_companies(resume_text: str) -> list[str]:
     companies = []
     seen = set()
     in_work_section = False
+    experience_content = []
     
     for i, line in enumerate(lines):
         line_stripped = line.strip()
         
         # Check for section headers that indicate work experience
-        if re.search(r'^\s*(Work\s+Experience|Internships?|Employment|Career)\s*(?:\n|:|$)', line, re.IGNORECASE):
+        if re.search(r'^\s*(Work\s+Experience|Experience|Internships?|Employment|Career)\s*(?:\n|:|$)', line, re.IGNORECASE):
             in_work_section = True
             continue
         # Exit work section if we hit other major sections
@@ -125,18 +128,71 @@ def extract_work_experience_companies(resume_text: str) -> list[str]:
             continue
         
         if in_work_section:
-            # Check if this line is a work experience entry: "Title | Company" or "Company | Title"
-            work_exp_match = re.search(r'([A-Z][^|]*?)\s*\|\s*([A-Za-z0-9][A-Za-z0-9\s&\-\.]+?)(?:\s{2,}|$)', line)
-            
-            if work_exp_match and not any(keyword in line_stripped.lower() for keyword in ['required', 'preferred', 'qualifications', 'skills:']):
-                left_side = work_exp_match.group(1).strip()
-                right_side = work_exp_match.group(2).strip()
+            experience_content.append(line_stripped)
+
+    work_exp_text = '\n'.join(experience_content)
+
+    if experience_content:
+        # Call to LLM to extract company names to handle different cases 
+        try:
+            validator = ChatOpenAI(model="gpt-4o", timeout=30, max_retries=1)
+            response = validator.invoke(
+            f"""
+You are a resume parsing assistant. 
+Extract the company name from the following line of text, 
+which is part of a candidate's work experience section. 
+Return ONLY valid JSON:
+{{"companies": ["Company A", "Company B"]}}
+
+If no company names can be confidently extracted:
+{{"companies": []}}
+Line: "{work_exp_text}"
+            """
+                    )
+            if DEBUG_PRIVACY_LOGS:
+                print("[VALIDATION RAW RESPONSE]", repr(response.content))
+
+            try:
+                result = json.loads(response.content)
+            except json.JSONDecodeError as e:
+                print(
+                    "[VALIDATION WARNING] "
+                    "Skipping LLM resume validation because local checks passed but "
+                    f"the LLM returned invalid JSON: {e}"
+                )
+
+            companies_extracted = result.get("companies", [])
+
+            for company in companies_extracted:
+                company = company.strip()
+                if company and company.lower() != "none" and company not in seen:
+                    companies.append(company)
+                    seen.add(company)
+        except HTTPException:
+            raise HTTPException(status_code=500, detail="LLM validation failed")
+
+        except Exception as e:
+            print(
+                "[VALIDATION WARNING] "
+                "Skipping LLM resume validation because local checks passed but "
+                f"the LLM validation step failed: {type(e).__name__}: {e}"
+            )
+
+    # If LLM validation fails, fall back to local regex extraction
+    if not companies:
+        for line in experience_content:
+            #Regex: Match lines with a pipe separator, capturing left and right sides ("Company | Role" or "Role | Company")
+            work_exp_regex = re.search(r'([A-Z][^|]*?)\s*\|\s*([A-Za-z0-9][A-Za-z0-9\s&\-\.]+?)(?:\s{2,}|$)', line)
+
+            if work_exp_regex and not any(keyword in line.lower() for keyword in ['required', 'preferred', 'qualifications', 'skills:']):
+                left_side = work_exp_regex.group(1).strip()
+                right_side = work_exp_regex.group(2).strip()
                 
                 # Determine which is company vs role with better heuristics
                 # Job title keywords suggest it's a role, not a company
                 job_title_keywords = ['engineer', 'developer', 'manager', 'analyst', 'specialist', 'architect',
-                                     'lead', 'senior', 'junior', 'associate', 'director', 'executive', 'officer',
-                                     'coordinator', 'consultant', 'intern', 'assistant']
+                                        'lead', 'senior', 'junior', 'associate', 'director', 'executive', 'officer',
+                                        'coordinator', 'consultant', 'intern', 'assistant']
                 
                 left_has_title_keywords = any(keyword in left_side.lower() for keyword in job_title_keywords)
                 right_has_title_keywords = any(keyword in right_side.lower() for keyword in job_title_keywords)
@@ -155,7 +211,7 @@ def extract_work_experience_companies(resume_text: str) -> list[str]:
                 
                 # Filter out leadership/organizational terms
                 leadership_terms = ['club', 'organization', 'society', 'association', 
-                                   'board', 'committee', 'president', 'founder', 'group']
+                                    'board', 'committee', 'president', 'founder', 'group']
                 
                 if (len(candidate) > 5 and 
                     candidate not in seen and
@@ -470,32 +526,32 @@ Based on this analysis, please provide feedback ONLY in the following structured
    - How to acquire or credibly position existing experience to address it
    - If there are 3+ missing required skills, prioritize the top 3 most critical.
    - For ALL mismatches, warnings, or red flags noted above (seniority level, education field/degree, skill gaps, qualifications), provide direct and honest assessment with specific recommendations.
-   - If certain information from the resume was not extracted, note that as a critical issue and recommend how to fix it.
+   - If certain information from the resumé was not extracted, note that as a critical issue and recommend how to fix it.
    - If certain information from the job description was not extracted, don't include that in the gap analysis since it's not the candidate's fault, but you can note it as a potential risk factor.
    - When the job requires a broad education field category such as STEM, technical, engineering, quantitative, humanities, arts, business, or a related field, do NOT treat a specific qualifying major as a mismatch. For example, Computer Science satisfies STEM/technical/quantitative requirements.
-   - If no employer names were reliably extracted, do NOT consider that as a mismatch and do NOT include that in the gap analysis. The extraction issue could just be based on the resume format. Use projects, skills, education, and resume bullets as evidence instead.
+   - If no employer names were reliably extracted from the work experiences section of their resumé, suggest to the user that they fix formatting issues with their resumé. Use projects, skills, education, and resumé bullets as evidence instead.
 
-**Strengths of your current resume**
+**Strengths of your current resumé**
    Reference the specific matched skills and qualifications from above. Select 2-3 that are most relevant to this role. Explain how each one differentiates the candidate.
    **CRITICAL: When mentioning any matched skill, reference the source (company, project, section) from the SOURCE ATTRIBUTION FOR MATCHED SKILLS section. This ensures you're attributing skills to the correct source.**
-   If you reference work experience, you must mention the specific company name from the attribution, and only reference companies identified in the resume's Work Experience section. Do NOT mention any companies, non-profit organizations, or leadership positions that are not listed above when discussing work experience.
-   Talk about what the resume did well in showcasing these strengths.
+   If you reference work experience, you must mention the specific company name from the attribution, and only reference companies identified in the resumé's Work Experience section. Do NOT mention any companies, non-profit organizations, or leadership positions that are not listed above when discussing work experience.
+   Talk about what the resumé did well in showcasing these strengths.
    
 **Gap-Bridging Strategy - How to Use Your Strengths to Reach For Missing Skills**
    Your matched skills are foundational. For the most critical missing skills:
    - Identify which of your matched skills are most transferable to learning the missing ones
-   - Suggest specific projects, certifications, or examples from your resume that can bridge the gap
+   - Suggest specific projects, certifications, or examples from your resumé that can bridge the gap
    - Propose concrete actions (how to learn, what to highlight in application materials, conversation points for interviews). Be creative but realistic.
 
-**General Suggestions for Resume Improvement**
-   If special cases were identified (weak action verbs, missing metrics, repetitive verbs, over/underqualification, education mismatch), provide specific recommendations for how to address them in the resume. Include examples of how to rewrite bullets or reframe experience to better align with the job description.
-   If no special cases were identified, provide 1-2 general suggestions for improving the resume's impact and clarity.
+**General Suggestions for Resumé Improvement**
+   If special cases were identified (weak action verbs, missing metrics, repetitive verbs, over/underqualification, education mismatch), provide specific recommendations for how to address them in the resumé. Include examples of how to rewrite bullets or reframe experience to better align with the job description.
+   If no special cases were identified, provide 1-2 general suggestions for improving the resumé's impact and clarity.
 
 **Conclusion**
     Write a 1-2 sentence closing summary that encourages the candidate to take action and emphasizes that while there are gaps, they can be addressed with the right strategy.
    """
     
-    #logger.debug("Generated resume feedback prompt for job title: %s", job_title)
+    #logger.debug("Generated resumé feedback prompt for job title: %s", job_title)
     
     return prompt.strip()
 
