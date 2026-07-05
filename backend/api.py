@@ -193,12 +193,12 @@ RESUME_SUPPLEMENTAL_SIGNALS = [
 ]
 
 name_patterns = [
-    r"\b[A-Z][a-z]+ [A-Z][a-z]+\b",                           # John Smith
-    r"\b[A-Z][a-z]+ [A-Z]\. [A-Z][a-z]+\b",                  # John R. Smith
-    r"\b[A-Z][a-z]+ [A-Z][a-z]+ [A-Z][a-z]+\b",             # John Robert Smith
-    r"\b[A-Z]{2,} [A-Z]{2,}\b",                             # HARSHIL PAHUJA
-    r"\b[A-Z][a-z]+(?:-[A-Z][a-z]+)? [A-Z][a-z]+(?:-[A-Z][a-z]+)?\b",
-    r"\b[A-Z][a-z]+(?:'[A-Z][a-z]+)? [A-Z][a-z]+(?:'[A-Z][a-z]+)?\b",
+    r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b",                           # John Smith
+    r"\b[A-Z][a-z]+\s+[A-Z]\.\s+[A-Z][a-z]+\b",                  # John R. Smith
+    r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b",             # John Robert Smith
+    r"\b[A-Z]{2,}\s+[A-Z]{2,}\b",                             # HARSHIL PAHUJA
+    r"\b[A-Z][a-z]+(?:-[A-Z][a-z]+)?\s+[A-Z][a-z]+(?:-[A-Z][a-z]+)?\b",
+    r"\b[A-Z][a-z]+(?:'[A-Z][a-z]+)?\s+[A-Z][a-z]+(?:'[A-Z][a-z]+)?\b",
 ]
 
 #Check whether the user actually uploaded a valid job description and not some slop
@@ -251,7 +251,7 @@ def validate_resume_text(text: str) -> None:
         )
     
     # Required header information
-    header = text[:500]
+    header = re.sub(r"\s+", " ", text[:500]).strip()
     has_full_name = any(re.search(pattern, header) for pattern in name_patterns)
     has_email = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", header) is not None
     has_phone = re.search(r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}", header) is not None
