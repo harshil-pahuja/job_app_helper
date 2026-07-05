@@ -221,7 +221,6 @@ Please provide personalized resume feedback for a job application to: {job_title
 IMPORTANT: {f"The candidate's identified WORK EXPERIENCE employers are: {', '.join(companies)}." if companies else "No employer names were reliably extracted from the resume."}
 Do NOT mention any companies, non-profit organizations, or leadership positions that are not listed above when discussing work experience.
 Only reference the actual employers listed above.
-If no employer names were reliably extracted, do NOT assume the candidate lacks work experience. The extraction issue could just be based on the resume format. Use projects, skills, education, and resume bullets as evidence instead.
 
 **CANDIDATE WORK EXPERIENCE CONTEXT:**
 Work experience at: {company_context}{skills_context}
@@ -474,6 +473,7 @@ Based on this analysis, please provide feedback ONLY in the following structured
    - If certain information from the resume was not extracted, note that as a critical issue and recommend how to fix it.
    - If certain information from the job description was not extracted, don't include that in the gap analysis since it's not the candidate's fault, but you can note it as a potential risk factor.
    - When the job requires a broad education field category such as STEM, technical, engineering, quantitative, humanities, arts, business, or a related field, do NOT treat a specific qualifying major as a mismatch. For example, Computer Science satisfies STEM/technical/quantitative requirements.
+   - If no employer names were reliably extracted, do NOT consider that as a mismatch and do NOT include that in the gap analysis. The extraction issue could just be based on the resume format. Use projects, skills, education, and resume bullets as evidence instead.
 
 **Strengths of your current resume**
    Reference the specific matched skills and qualifications from above. Select 2-3 that are most relevant to this role. Explain how each one differentiates the candidate.
