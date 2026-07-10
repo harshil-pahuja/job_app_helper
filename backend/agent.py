@@ -152,8 +152,12 @@ Line: "{work_exp_text}"
             if DEBUG_PRIVACY_LOGS:
                 print("[VALIDATION RAW RESPONSE]", repr(response.content))
 
+            result = {"companies": []}
+            raw_content = (response.content or "").strip()
+            raw_content = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_content, flags=re.IGNORECASE)
+
             try:
-                result = json.loads(response.content)
+                result = json.loads(raw_content)
             except json.JSONDecodeError as e:
                 print(
                     "[VALIDATION WARNING] "
@@ -162,12 +166,19 @@ Line: "{work_exp_text}"
                 )
 
             companies_extracted = result.get("companies", [])
+            if isinstance(companies_extracted, str):
+                companies_extracted = [companies_extracted]
+            if not companies_extracted and result.get("company_name"):
+                companies_extracted = [result["company_name"]]
+
+            print(f"[COMPANY EXTRACTION] count={len(companies_extracted)}")
 
             for company in companies_extracted:
                 company = company.strip()
                 if company and company.lower() != "none" and company not in seen:
                     companies.append(company)
                     seen.add(company)
+            
         except HTTPException:
             raise HTTPException(status_code=500, detail="LLM validation failed")
 
@@ -219,6 +230,92 @@ Line: "{work_exp_text}"
                     not any(term in candidate_lower for term in leadership_terms)):
                     companies.append(candidate)
                     seen.add(candidate)
+
+    # Some PDFs extract section headers and content onto one long line, e.g.
+    # "EXPERIENCE Google, Sunnyvale..." instead of a standalone "Experience"
+    # header. If the normal section-line parsing found nothing, send a bounded
+    # normalized chunk around the experience heading to the same LLM extractor.
+    if not companies:
+        normalized_text = re.sub(r"\s+", " ", resume_text).strip()
+        experience_match = re.search(
+            r"\b(?:Work\s+Experience|Experience|Internships?|Employment|Career)\b",
+            normalized_text,
+            re.IGNORECASE,
+        )
+
+        if experience_match:
+            after_experience = normalized_text[experience_match.end():]
+            next_section_match = re.search(
+                r"\b(?:Projects|Education|Leadership|Awards|Skills|Certifications?|References)\b",
+                after_experience,
+                re.IGNORECASE,
+            )
+            chunk_end = (
+                experience_match.end() + next_section_match.start()
+                if next_section_match
+                else min(len(normalized_text), experience_match.start() + 3500)
+            )
+            bounded_experience_text = normalized_text[experience_match.start():chunk_end][:3500]
+
+            if bounded_experience_text:
+                try:
+                    validator = ChatOpenAI(model="gpt-4o", timeout=30, max_retries=1)
+                    response = validator.invoke(
+                        f"""
+You are a resume parsing assistant.
+Extract employer/company names from this bounded work experience text.
+
+Return ONLY valid JSON:
+{{"companies": ["Company A", "Company B"]}}
+
+If no company names can be confidently extracted:
+{{"companies": []}}
+
+Rules:
+- Include only actual employers, labs, universities, startups, or organizations where the candidate worked.
+- Do not include job titles, dates, locations, skills, bullets, or projects.
+
+Work experience text:
+"{bounded_experience_text}"
+                        """
+                    )
+                    if DEBUG_PRIVACY_LOGS:
+                        print("[COMPANY EXTRACTION BOUNDED RAW RESPONSE]", repr(response.content))
+
+                    result = {"companies": []}
+                    raw_content = (response.content or "").strip()
+                    raw_content = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_content, flags=re.IGNORECASE)
+
+                    try:
+                        result = json.loads(raw_content)
+                    except json.JSONDecodeError as e:
+                        print(
+                            "[VALIDATION WARNING] "
+                            "Skipping bounded company extraction because "
+                            f"the LLM returned invalid JSON: {e}"
+                        )
+
+                    companies_extracted = result.get("companies", [])
+                    if isinstance(companies_extracted, str):
+                        companies_extracted = [companies_extracted]
+                    if not companies_extracted and result.get("company_name"):
+                        companies_extracted = [result["company_name"]]
+
+                    print(f"[COMPANY EXTRACTION BOUNDED] count={len(companies_extracted)}")
+
+                    for company in companies_extracted:
+                        company = company.strip()
+                        if company and company.lower() != "none" and company not in seen:
+                            companies.append(company)
+                            seen.add(company)
+                except HTTPException:
+                    raise HTTPException(status_code=500, detail="LLM validation failed")
+                except Exception as e:
+                    print(
+                        "[VALIDATION WARNING] "
+                        "Skipping bounded company extraction because "
+                        f"the LLM validation step failed: {type(e).__name__}: {e}"
+                    )
     
     return companies
 
@@ -526,10 +623,10 @@ Based on this analysis, please provide feedback ONLY in the following structured
    - How to acquire or credibly position existing experience to address it
    - If there are 3+ missing required skills, prioritize the top 3 most critical.
    - For ALL mismatches, warnings, or red flags noted above (seniority level, education field/degree, skill gaps, qualifications), provide direct and honest assessment with specific recommendations.
-   - If certain information from the resumé was not extracted, note that as a critical issue and recommend how to fix it.
-   - If certain information from the job description was not extracted, don't include that in the gap analysis since it's not the candidate's fault, but you can note it as a potential risk factor.
+   - If a field is not extracted from the resume AND that field is required by a job posting, note it as a critical issue and recommend how to fix it. Do not mention missing resume information for fields from the job description that are "Not extracted" or "Not specified".
+   - If job description extraction yields "Not extracted" or "Not specified" for any required information, do NOT include that in the gap analysis since it's not the candidate's fault.
    - When the job requires a broad education field category such as STEM, technical, engineering, quantitative, humanities, arts, business, or a related field, do NOT treat a specific qualifying major as a mismatch. For example, Computer Science satisfies STEM/technical/quantitative requirements.
-   - If the WORK EXPERIENCE CONTEXT shows no companies were extracted from the resumé, note that as a critical issue and recommend how to fix it.
+   - If the WORK EXPERIENCE CONTEXT shows no companies were extracted from the resumé, note that as a critical issue and recommend how to fix it. Otherwise, only reference companies that were extracted from the resumé's Work Experience section.
 
 **Strengths of your current resumé**
    Reference the specific matched skills and qualifications from above. Select 2-3 that are most relevant to this role. Explain how each one differentiates the candidate.
