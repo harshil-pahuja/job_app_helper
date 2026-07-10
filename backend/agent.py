@@ -627,23 +627,27 @@ Based on this analysis, please provide feedback ONLY in the following structured
    - If job description extraction yields "Not extracted" or "Not specified" for any required information, do NOT include that in the gap analysis since it's not the candidate's fault.
    - When the job requires a broad education field category such as STEM, technical, engineering, quantitative, humanities, arts, business, or a related field, do NOT treat a specific qualifying major as a mismatch. For example, Computer Science satisfies STEM/technical/quantitative requirements.
    - If the WORK EXPERIENCE CONTEXT shows no companies were extracted from the resumé, note that as a critical issue and recommend how to fix it. Otherwise, only reference companies that were extracted from the resumé's Work Experience section.
+   Use bullet points for each gap and recommendation, NOT paragraphs. Be concise and specific.
 
 **Strengths of your current resumé**
    Reference the specific matched skills and qualifications from above. Select 2-3 that are most relevant to this role. Explain how each one differentiates the candidate.
    **CRITICAL: When mentioning any matched skill, reference the source (company, project, section) from the SOURCE ATTRIBUTION FOR MATCHED SKILLS section. This ensures you're attributing skills to the correct source.**
    If you reference work experience, you must mention the specific company name from the attribution, and only reference companies identified in the resumé's Work Experience section. Do NOT mention any companies, non-profit organizations, or leadership positions that are not listed above when discussing work experience.
    Talk about what the resumé did well in showcasing these strengths.
+   Use bullet points for each strength, NOT paragraphs. Be concise and specific.
    
 **Gap-Bridging Strategy - How to Use Your Strengths to Reach For Missing Skills**
    Your matched skills are foundational. For the most critical missing skills:
    - Identify which of your matched skills are most transferable to learning the missing ones
    - Suggest specific projects, certifications, or examples from your resumé that can bridge the gap
    - Propose concrete actions (how to learn, what to highlight in application materials, conversation points for interviews). Be creative but realistic.
+   Use bullet points for each strategy, NOT paragraphs. Be concise and specific.
 
 **General Suggestions for Resumé Improvement**
    If special cases were identified (weak action verbs, missing metrics, repetitive verbs, over/underqualification, education mismatch), provide specific recommendations for how to address them in the resumé. Include examples of how to rewrite bullets or reframe experience to better align with the job description.
    If no special cases were identified, provide 1-2 general suggestions for improving the resumé's impact and clarity.
-
+   Use bullet points for each suggested improvement, NOT paragraphs. Be concise and specific.
+   
 **Conclusion**
     Write a 1-2 sentence closing summary that encourages the candidate to take action and emphasizes that while there are gaps, they can be addressed with the right strategy.
    """
