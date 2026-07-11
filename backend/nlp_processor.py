@@ -2469,7 +2469,7 @@ def map_skills_to_source(resume_text, resume_skills):
         line = lines[i].strip()
         
         # Check if this is a major section header
-        major_section_match = re.search(r'^\s*(Work\s+Experience|Internships?|Employment|Career|Projects|Education|Leadership|Awards|Skills|Certifications?|References)\s*(?:\n|:|$)', lines[i], re.IGNORECASE)
+        major_section_match = re.search(r'^\s*(Work\s+Experience(s)?|Internship(s)?|Employment|Career|Projects|Education|Leadership|Awards|Skills|Certifications?|References)\s*(?:\n|:|$)', lines[i], re.IGNORECASE)
         
         if major_section_match:
             # Save previous section if exists
@@ -2481,7 +2481,7 @@ def map_skills_to_source(resume_text, resume_skills):
             i += 1
             
             # For work experience sections, look ahead for individual work entries
-            if current_section_name in ['work experience', 'internships', 'employment', 'career']:
+            if current_section_name in ['work experience', 'work experiences', 'internship', 'internships', 'employment', 'career']:
                 j = i
                 while j < len(lines):
                     # Check for next major section header
@@ -2510,7 +2510,7 @@ def map_skills_to_source(resume_text, resume_skills):
                             if re.search(r'^\s*(Projects|Education|Leadership|Awards|Skills|Certifications?|References)\s*(?:\n|:|$)', lines[k], re.IGNORECASE):
                                 break
                             
-                            next_work_match = re.search(r'([A-Z][^|]*?)\s*\|\s*([A-Za-z][A-Za-z\s&]+?)(?:\s{2,}|$)', lines[k])
+                            next_work_match = re.search(r'([A-Z][^|]*?)\s*\|\s*([A-Za-z0-9][A-Za-z0-9\s&\-\.]+?)(?:\s{2,}|$)', lines[k])
                             if next_work_match and not any(kw in lines[k].lower() for kw in ['required', 'preferred']):
                                 break
                             

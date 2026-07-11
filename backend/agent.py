@@ -119,7 +119,7 @@ def extract_work_experience_companies(resume_text: str) -> list[str]:
         line_stripped = line.strip()
         
         # Check for section headers that indicate work experience
-        if re.search(r'^\s*(Work\s+Experience|Experience|Internships?|Employment|Career)\s*(?:\n|:|$)', line, re.IGNORECASE):
+        if re.search(r'^\s*(Work\s+Experience(s)?|Experience(s)?|Internship(s)?|Employment|Career)\s*(?:\n|:|$)', line, re.IGNORECASE):
             in_work_section = True
             continue
         # Exit work section if we hit other major sections
@@ -238,7 +238,7 @@ Line: "{work_exp_text}"
     if not companies:
         normalized_text = re.sub(r"\s+", " ", resume_text).strip()
         experience_match = re.search(
-            r"\b(?:Work\s+Experience|Experience|Internships?|Employment|Career)\b",
+            r"\b(?:Work\s+Experience(s)?|Experience(s)?|Internship(s)?|Employment|Career)\b",
             normalized_text,
             re.IGNORECASE,
         )

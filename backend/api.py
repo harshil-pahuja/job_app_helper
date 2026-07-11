@@ -203,18 +203,127 @@ name_patterns = [
 
 #Check whether the user actually uploaded a valid job description and not some slop
 def validate_job_description_text(text: str) -> None:
+    if not text or not text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Please paste a job description before analyzing.",
+        )
+
     normalized = text.lower()
 
     has_required_signal = "required" in normalized or "requirements" in normalized or "minimum" in normalized or "must have" in normalized or "basic" in normalized
     has_preferred_signal = "preferred" in normalized or "nice to have" in normalized
     has_responsibilities_signal = "responsibilities" in normalized or "what you will do" in normalized
     has_summary_signal = "summary" in normalized or "overview" in normalized or "about the role" in normalized
+    local_signals = {
+        "required_or_minimum_qualifications": has_required_signal,
+        "preferred_qualifications": has_preferred_signal,
+        "responsibilities": has_responsibilities_signal,
+        "summary_or_overview": has_summary_signal,
+    }
+    local_signal_count = sum(1 for found in local_signals.values() if found)
 
-    if not (has_required_signal or has_preferred_signal or has_responsibilities_signal or has_summary_signal):
-        raise HTTPException(
-            status_code=400,
-            detail="Pasted text does not look like a job description. Please upload a job description with sections for summary, required and/or preferred qualifications, and try again."
+    try:
+        validator = ChatOpenAI(
+            model="gpt-4o",
+            temperature=0,
+            timeout=30,
+            max_retries=1,
         )
+
+        response = validator.invoke(
+            f"""
+You are validating pasted text for a job application analysis platform.
+
+Determine whether the text is a job posting or job description with enough
+information to compare against a resume.
+
+Return ONLY valid JSON in this format:
+
+{{
+  "is_job_description": true,
+  "confidence": 0.95,
+  "document_type": "job_description",
+  "primary_aspects_found": {{
+    "role_summary": true,
+    "responsibilities": true,
+    "required_qualifications": true,
+    "preferred_qualifications": false
+  }},
+  "reason": "Brief explanation"
+}}
+
+Primary aspects to look for:
+- role summary, overview, title, or team context
+- responsibilities, duties, or what the candidate will do
+- required/basic/minimum qualifications
+- preferred/nice-to-have qualifications
+- skills, technologies, education, experience, or eligibility requirements
+
+Examples of text that are NOT job postings include, but are not limited to, resume, cover letter,
+article, assignment, random notes, or any other kind of text that is too vague to identify a role.
+
+The local keyword signals found were:
+{json.dumps(local_signals)}
+
+Text:
+{text[:6000]}
+"""
+        )
+
+        if DEBUG_PRIVACY_LOGS:
+            print("[JOB VALIDATION RAW RESPONSE]", repr(response.content))
+
+        raw_content = (response.content or "").strip()
+        raw_content = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_content, flags=re.IGNORECASE)
+        json_match = re.search(r"\{.*\}", raw_content, re.DOTALL)
+        if json_match:
+            raw_content = json_match.group()
+
+        result = json.loads(raw_content)
+        is_job_description = bool(result.get("is_job_description"))
+        confidence = float(result.get("confidence", 0))
+        aspects = result.get("primary_aspects_found", {})
+        aspect_count = (
+            sum(1 for found in aspects.values() if found)
+            if isinstance(aspects, dict)
+            else 0
+        )
+
+        if is_job_description and confidence >= 0.70 and (aspect_count >= 1 or local_signal_count >= 1):
+            return
+
+        # Let obvious job postings through when the model is overly strict,
+        # but keep weak/random text blocked.
+        if local_signal_count >= 2:
+            print(
+                "[JOB VALIDATION WARNING] "
+                "LLM rejected job description, but local signals were strong enough to continue."
+            )
+            return
+
+    except json.JSONDecodeError as e:
+        print(
+            "[JOB VALIDATION WARNING] "
+            "Falling back to local job-description signals because the LLM returned invalid JSON: "
+            f"{e}"
+        )
+        if local_signal_count >= 1:
+            return
+
+    except Exception as e:
+        print(
+            "[JOB VALIDATION WARNING] "
+            "Falling back to local job-description signals because LLM validation failed: "
+            f"{type(e).__name__}: {e}"
+        )
+        if local_signal_count >= 1:
+            return
+
+    raise HTTPException(
+        status_code=400,
+        detail="Pasted text does not look like a job description. Please upload a job description with sections for summary, required and/or preferred qualifications, and try again."
+    )
 
 # Check whether the user actually uploaded a valid resume and not some other document.
 def validate_resume_text(text: str) -> None:
