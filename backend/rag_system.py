@@ -211,7 +211,7 @@ def create_retrieve_resume_tool(rag_instance: RAGSystem):
 
 def main():
     """Test skill extraction from resume to check if C++ is detected."""
-    from backend.nlp_processor import extract_skills
+    from backend.job_processor import extract_skills
     import sys
     from pathlib import Path
     

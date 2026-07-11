@@ -11,11 +11,14 @@ load_dotenv()
 
 from backend.agent import run_agent_analysis, generate_resume_feedback_prompt
 from backend.rag_system import RAGSystem
-from backend.nlp_processor import (
-    extract_qualifications, extract_skills, extract_skills_with_llm, extract_resume_skills, extract_job_title_and_seniority,
-    calculate_skill_match_score, extract_education, extract_education_with_llm, extract_education_field, extract_education_field_with_llm,
+from backend.job_processor import (
+    extract_qualifications, extract_skills, extract_job_title_and_seniority,
+    calculate_skill_match_score, extract_education, extract_education_field,
+    match_education, extract_job_seniority, match_seniority
+)
+from backend.resume_processor import (
     extract_resume_education_degree, extract_resume_education_field,
-    match_education, extract_job_seniority, extract_resume_seniority, match_seniority
+    extract_resume_seniority
 )
 
 # TODO: Import requests when backend API is ready
@@ -150,7 +153,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                 # Extract job-side fields early so we can compute matches whether or not a resume file is uploaded
                 job_required = extract_qualifications(job_description)[0] if job_description else ""
                 job_preferred = extract_qualifications(job_description)[1] if job_description else ""
-                job_skills = extract_skills_with_llm(job_description, context='job_posting') if job_description else []
+                job_skills = extract_skills(job_description, context='job_posting') if job_description else []
                 expected_education = extract_education(job_description) if job_description else []
                 job_level = extract_job_title_and_seniority(job_description)[1] if job_description else None
 
@@ -192,16 +195,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                                 os.remove(tmp_path)
 
                     # Compute and display skill-match results (works even without an uploaded PDF)
-                    # Use LLM-based extraction for more accurate skill identification
-                    resume_skills = None
-                    if resume_text:
-                        try:
-                            resume_skills = extract_skills_with_llm(resume_text, context='resume')
-                        except Exception as e:
-                            # Fallback to direct extraction if LLM fails
-                            resume_skills = extract_resume_skills(resume_text=resume_text)
-                    else:
-                        resume_skills = []
+                    resume_skills = extract_skills(resume_text, context='resume') if resume_text else []
                     
                     # Combine explicit qualifications (required + preferred) and parsed job skills into a single skills list.
                     # Treats required and preferred as one unified "skills" criteria.
@@ -217,10 +211,8 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     st.divider()
                     st.subheader("📚 Education Analysis")
                     
-                    # Use LLM-based extraction for better coverage of degree types
-                    job_required_education = extract_education_with_llm(job_description) if job_description else []
-                    # Use LLM-based extraction for better coverage of education fields
-                    job_required_education_fields = extract_education_field_with_llm(job_description) if job_description else []
+                    job_required_education = extract_education(job_description) if job_description else []
+                    job_required_education_fields = extract_education_field(job_description) if job_description else []
 
                     # Use dedicated RAG+LLM functions for resume-side education extraction
                     rag_instance = rag if (resume_text and rag.vectorstore) else None
@@ -374,7 +366,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     overall_education_match = degree_match
                     
                     # Map skills to their source (work experience, projects, skills section, etc.)
-                    from backend.nlp_processor import map_skills_to_source
+                    from backend.job_processor import map_skills_to_source
                     skills_by_source = map_skills_to_source(resume_text, resume_skills) if resume_skills else {}
                     
                     extraction_results = {

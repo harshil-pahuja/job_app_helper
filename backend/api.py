@@ -30,21 +30,22 @@ from langchain_openai import ChatOpenAI
 load_dotenv()
 
 from backend.agent import generate_resume_feedback_prompt, run_agent_analysis
-from backend.nlp_processor import (
+from backend.job_processor import (
     calculate_skill_match_score,
-    extract_education_field_with_llm,
-    extract_education_with_llm,
+    extract_education,
+    extract_education_field,
     extract_job_seniority,
     extract_job_title_and_seniority,
     extract_qualifications,
-    extract_resume_education_degree,
-    extract_resume_education_field,
-    extract_resume_seniority,
-    extract_resume_skills,
-    extract_skills_with_llm,
+    extract_skills,
     map_skills_to_source,
     match_education,
     match_seniority,
+)
+from backend.resume_processor import (
+    extract_resume_education_degree,
+    extract_resume_education_field,
+    extract_resume_seniority,
 )
 from backend.rag_system import RAGSystem
 
@@ -628,9 +629,9 @@ async def analyze(
     if job_description:
         #job_description_text = validate_job_description_text(job_description)
         job_required, job_preferred = extract_qualifications(job_description)
-        job_skills = extract_skills_with_llm(job_description, context="job_posting")
-        job_required_education = extract_education_with_llm(job_description)
-        job_required_education_fields = extract_education_field_with_llm(job_description)
+        job_skills = extract_skills(job_description, context="job_posting")
+        job_required_education = extract_education(job_description)
+        job_required_education_fields = extract_education_field(job_description)
         # extract_job_seniority is the hybrid YoE+title pipeline (more accurate
         # for edge cases like "AI Engineer I, 4+ years"). Only fall back to the
         # title-only LLM extractor if the hybrid returns nothing.
@@ -667,10 +668,7 @@ async def analyze(
                 os.remove(tmp_path)
 
     if resume_text:
-        try:
-            resume_skills = extract_skills_with_llm(resume_text, context="resume")
-        except Exception:
-            resume_skills = extract_resume_skills(resume_text=resume_text)
+        resume_skills = extract_skills(resume_text, context="resume")
     else:
         resume_skills = []
 
