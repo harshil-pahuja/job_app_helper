@@ -582,7 +582,7 @@ def health():
 
 
 @app.post("/analyze")
-@limiter.limit("3/hour")  # Adjust as needed based on expected traffic and OpenAI budget
+@limiter.limit("10/hour")  # Adjust as needed based on expected traffic and OpenAI budget
 async def analyze(
     request: Request,
     job_description: str = Form(""),
