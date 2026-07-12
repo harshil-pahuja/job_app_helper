@@ -595,7 +595,6 @@ async def analyze(
     resume_text = ""
     resume_error = None
     job_error = None
-
     try:
         resume_text = _extract_resume_text(resume)
     except HTTPException as exc:
