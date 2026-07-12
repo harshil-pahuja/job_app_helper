@@ -57,6 +57,9 @@ DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
 # This is a soft protection
 
 def get_real_ip(request: Request):
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
     return get_remote_address(request)
 
 limiter = Limiter(key_func=get_real_ip)
@@ -592,6 +595,7 @@ async def analyze(
 
     Both a `resume` and `job_description` must be provided.
     """
+    print(f"[RATE LIMIT KEY] {get_real_ip(request)}")
     resume_text = ""
     resume_error = None
     job_error = None
