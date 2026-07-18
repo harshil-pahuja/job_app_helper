@@ -11,7 +11,7 @@ import os
 import tempfile
 import time
 import re
-from typing import Optional
+from typing import List, Optional
 
 from docx import Document  # python-docx — used to read .docx resumes
 
@@ -51,6 +51,17 @@ from backend.rag_system import RAGSystem
 
 app = FastAPI(title="Job Application Helper API")
 DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
+_EASYOCR_READER = None
+
+SUPPORTED_JOB_IMAGE_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+}
+SUPPORTED_JOB_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 
 # ── Rate limiting (slowapi) ──────────────────────────────────────────────────
 # Per-IP limits prevent any single user from burning through the OpenAI budget.
@@ -481,6 +492,83 @@ Document:
         return
     
 
+def _get_easyocr_reader():
+    """Create the EasyOCR reader lazily so API startup stays lightweight."""
+    global _EASYOCR_READER
+    if _EASYOCR_READER is None:
+        try:
+            import easyocr  # type: ignore
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="Image OCR is not available on this server. Please install easyocr.",
+            ) from exc
+
+        _EASYOCR_READER = easyocr.Reader(["en"], gpu=False)
+    return _EASYOCR_READER
+
+
+def convert_image_input_to_text(image_file: UploadFile) -> str:
+    """Extract job-description text from an uploaded image using EasyOCR."""
+    try:
+        image_file.file.seek(0)
+    except Exception:
+        pass
+
+    raw = image_file.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded job description image is empty.")
+
+    max_image_bytes = 8 * 1024 * 1024
+    if len(raw) > max_image_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded job description image is too large. Please upload an image smaller than 8 MB.",
+        )
+
+    content_type = (image_file.content_type or "").lower()
+    filename = (image_file.filename or "").lower()
+    is_supported_image = (
+        content_type in SUPPORTED_JOB_IMAGE_CONTENT_TYPES
+        or filename.endswith(SUPPORTED_JOB_IMAGE_EXTENSIONS)
+    )
+    if not is_supported_image:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported job description image type. Please upload a JPG, JPEG, PNG, WEBP, BMP, or TIFF image.",
+        )
+
+    try:
+        import numpy as np
+        from PIL import Image
+
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+        image_array = np.array(image)
+        reader = _get_easyocr_reader()
+        ocr_results = reader.readtext(image_array, detail=0, paragraph=True)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read text from the uploaded job description image: {exc}",
+        ) from exc
+
+    extracted_text = "\n".join(str(item).strip() for item in ocr_results if str(item).strip())
+    extracted_text = re.sub(r"\n{3,}", "\n\n", extracted_text).strip()
+    print("Extracted job description text from image:", extracted_text[:200], "..." if len(extracted_text) > 200 else "")
+    if len(extracted_text) < 50:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not extract enough readable job description text from the image. "
+                "Please upload a clearer image or paste the job description text directly."
+            ),
+        )
+
+    return extracted_text
+
+
 def _extract_resume_text(upload: UploadFile) -> str:
     """Read resume bytes from the upload and return decoded text.
 
@@ -588,7 +676,8 @@ def health():
 @limiter.limit("10/hour")  # Adjust as needed based on expected traffic and OpenAI budget
 async def analyze(
     request: Request,
-    job_description: str = Form(""),
+    job_description_text: str = Form(""),
+    job_description_image: Optional[List[UploadFile]] = File(None),
     resume: Optional[UploadFile] = File(None),
 ):
     """Run the full resume/job analysis pipeline and return JSON.
@@ -599,15 +688,44 @@ async def analyze(
     resume_text = ""
     resume_error = None
     job_error = None
+    image_job_description_text = ""
+    job_description_images = job_description_image or []
     try:
         resume_text = _extract_resume_text(resume)
     except HTTPException as exc:
         resume_error = exc.detail
 
-    try:
-        validate_job_description_text(job_description)
-    except HTTPException as exc:
-        job_error = exc.detail
+    # If both text input and image input are used, throw an exception stating
+    # that the user should only use one or the other.
+    if job_description_text.strip() and job_description_images:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide either a job description text or an image, not both. Upload one or the other and try again."
+        )
+
+    if len(job_description_images) > 5:
+        raise HTTPException(
+            status_code=400,
+            detail="You have uploaded too many job description images. Please upload a maximum of 5 images per request."
+        )
+
+    if job_description_images:
+        try:
+            image_job_description_text = "\n\n".join(
+                convert_image_input_to_text(image_file)
+                for image_file in job_description_images
+            )
+        except HTTPException as exc:
+            job_error = exc.detail
+
+    if image_job_description_text:
+        job_description_text = image_job_description_text.strip()
+
+    if job_error is None:
+        try:
+            validate_job_description_text(job_description_text)
+        except HTTPException as exc:
+            job_error = exc.detail
 
     if resume_error and job_error:
         raise HTTPException(
@@ -622,25 +740,25 @@ async def analyze(
         raise HTTPException(status_code=400, detail=job_error)
 
     MAX_JD_CHARS = 15_000
-    if len(job_description) > MAX_JD_CHARS:
+    if len(job_description_text) > MAX_JD_CHARS:
         raise HTTPException(
             status_code=400,
-            detail=f"Job description is too long ({len(job_description):,} characters). Please shorten it to under {MAX_JD_CHARS:,} characters.",
+            detail=f"Job description is too long ({len(job_description_text):,} characters). Please shorten it to under {MAX_JD_CHARS:,} characters.",
         )
     # ── Job-side extraction ────────────────────────────────────────────────
-    validate_job_description_text(job_description)
-    if job_description:
-        #job_description_text = validate_job_description_text(job_description)
-        job_required, job_preferred = extract_qualifications(job_description)
-        job_skills = extract_skills(job_description, context="job_posting")
-        job_required_education = extract_education(job_description)
-        job_required_education_fields = extract_education_field(job_description)
+    validate_job_description_text(job_description_text)
+    if job_description_text:
+        #job_description_text = validate_job_description_text(job_description_text)
+        job_required, job_preferred = extract_qualifications(job_description_text)
+        job_skills = extract_skills(job_description_text, context="job_posting")
+        job_required_education = extract_education(job_description_text)
+        job_required_education_fields = extract_education_field(job_description_text)
         # extract_job_seniority is the hybrid YoE+title pipeline (more accurate
         # for edge cases like "AI Engineer I, 4+ years"). Only fall back to the
         # title-only LLM extractor if the hybrid returns nothing.
         job_seniority = (
-            extract_job_seniority(job_description)
-            or extract_job_title_and_seniority(job_description)[1]
+            extract_job_seniority(job_description_text)
+            or extract_job_title_and_seniority(job_description_text)[1]
         )
     else:
         job_required, job_preferred = [], []
@@ -736,9 +854,9 @@ async def analyze(
 
     feedback_markdown = ""
     if resume_text and rag and rag.vectorstore:
-        job_title = job_description.split("\n")[0].strip() if job_description else "Position"
+        job_title = job_description_text.split("\n")[0].strip() if job_description_text else "Position"
         feedback_prompt = generate_resume_feedback_prompt(
-            job_title, job_description, extraction_results, resume_text=resume_text
+            job_title, job_description_text, extraction_results, resume_text=resume_text
         )
         try:
             feedback_markdown = run_agent_analysis(feedback_prompt, rag_instance=rag)

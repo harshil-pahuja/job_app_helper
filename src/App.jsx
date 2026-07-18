@@ -17,11 +17,15 @@ const STAGE_INTERVAL_MS = 4500;
 
 function App() {
   const [resumeFile, setResumeFile] = useState(null);
+  const [showJobTextBox, setShowJobTextBox] = useState(false);
+  const [showJobImageUpload, setShowJobImageUpload] = useState(false);
+  const [jobImages, setJobImages] = useState([]);
   const [jobDescription, setJobDescription] = useState('');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [stage, setStage] = useState(LOADING_STAGES[0]);
+  const [clearJobDescription, setClearJobDescription] = useState(false);
 
   useEffect(() => {
     if (!loading) return;
@@ -45,9 +49,11 @@ function App() {
       setError('Please upload a resume document (PDF or Word).');
       return;
     }
+    const hasTextJobDescription = jobDescription.trim().length > 0;
+    const hasImageJobDescription = jobImages.length > 0;
 
-    if (!jobDescription.trim()) {
-      setError('Please paste a job description to analyze against.');
+    if (!hasTextJobDescription && !hasImageJobDescription) {
+      setError('Please provide a job description to analyze against, either by pasting text or uploading images.');
       return;
     }
 
@@ -62,7 +68,13 @@ function App() {
 
     try {
       const formData = new FormData();
-      formData.append('job_description', jobDescription);
+      if (hasTextJobDescription) {
+        formData.append('job_description_text', jobDescription);
+      } else if (hasImageJobDescription) {
+        jobImages.forEach((file) => {
+          formData.append('job_description_image', file);
+        });
+      }
       formData.append('resume', resumeFile);
 
       const res = await fetch(`${API_BASE}/analyze`, {
@@ -88,6 +100,28 @@ function App() {
       setLoading(false);
     }
   };
+  // Async function - this can happen any time the user clicks the "Insert Sample Job Description" button or the "Upload Job Description Image" button. It will fetch a sample job description from the backend and set it in the jobDescription state.
+  async function inputJobDescriptionText(isImageUpload, isTextInput, isClear = false) {
+
+    if (isTextInput) {
+        setShowJobTextBox(true);   // Tell React to display it
+        setShowJobImageUpload(false);   // Hide the image upload option
+        setJobImages([]);   // Clear any previously uploaded images
+    }
+
+    if (isImageUpload) {
+        setShowJobImageUpload(true);   // Tell React to display it
+        setShowJobTextBox(false);   // Hide the text input option
+        setJobDescription('');   // Clear any previously pasted text
+    }
+    if (isClear) {
+        setJobDescription('');
+        setShowJobTextBox(false);
+        setShowJobImageUpload(false);
+        setClearJobDescription(true);
+        setJobImages([]);
+    }
+}
 
   return (
     <div className="app-page">
@@ -120,15 +154,82 @@ function App() {
         <label className="field-label">
           <span>Job Description</span>
           <small className="field-hint">
+            Choose whether to paste the job description text or upload images of the job description. 
+          </small>
+          <small className="field-hint">
+            Only one method can be used at a time. If you paste text, the image upload will be ignored. If you upload images, the pasted text will be ignored.
+          </small>
+          <small className="field-hint">
+            If you choose to upload images, the system will only process up to 4 images per request.
+          </small>
+          <small className="field-hint">
             For maximum accuracy, include the job title, description, and requirements.
           </small>
-          <textarea
-            value={jobDescription}
-            onChange={(e) => setJobDescription(e.target.value)}
-            placeholder="Paste the job title, description, and requirements..."
-            rows={10}
-            className="job-textarea"
-          />
+          <button type="button" onClick={() => inputJobDescriptionText(false, true)} className="insert-text-button">
+            Insert Sample Job Description
+          </button>
+          {showJobTextBox && (
+            <textarea
+              value={jobDescription}
+              onChange={(e) => setJobDescription(e.target.value)}
+              placeholder="Paste the job title, description, and requirements..."
+              rows={10}
+              className="job-textarea"
+            />
+          )}
+          <button type="button" onClick={() => inputJobDescriptionText(true, false)} className="image-upload-button">
+            Upload Job Description Image
+          </button>
+          {showJobImageUpload && (
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(e) => {
+                const files = Array.from(e.target.files);
+                if (files.length > 4) {
+                  setError('You can only upload up to 4 images for the job description.');
+                  return;
+                }
+                // Here you would handle the image files, e.g., send them to the backend for processing.
+                // For now, we just log them.
+                setJobImages((prevImages) => [...prevImages, ...files]);
+                setError(''); // Clear any previous error
+                e.target.value = ''; // Reset the input so the same file can be selected again if needed
+              }}
+              className="image-input"
+            />
+          )}
+          <div className="image-preview-container">
+            {jobImages.map((file, index) => (
+              <div
+                key={`${file.name}-${file.lastModified}-${index}`}
+                className="image-preview"
+              >
+                <img
+                  src={URL.createObjectURL(file)}
+                  alt={`Uploaded job description ${index + 1}`}
+                />
+
+                <p>{file.name}</p>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setJobImages((prevImages) =>
+                      prevImages.filter((_, imageIndex) => imageIndex !== index)
+                    );
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => inputJobDescriptionText(false, false, true)} className="clear-button">
+            Clear
+          </button>
+          {clearJobDescription}
         </label>
 
         <button type="submit" disabled={loading} className="submit-button">
