@@ -703,10 +703,10 @@ async def analyze(
             detail="Please provide either a job description text or an image, not both. Upload one or the other and try again."
         )
 
-    if len(job_description_images) > 5:
+    if len(job_description_images) > 4:
         raise HTTPException(
             status_code=400,
-            detail="You have uploaded too many job description images. Please upload a maximum of 5 images per request."
+            detail="You have uploaded too many job description images. Please upload a maximum of 4 images per request."
         )
 
     if job_description_images:
