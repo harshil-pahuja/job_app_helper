@@ -12,7 +12,7 @@ load_dotenv()
 from backend.agent import run_agent_analysis, generate_resume_feedback_prompt
 from backend.rag_system import RAGSystem
 from backend.job_processor import (
-    extract_qualifications, extract_skills, extract_job_title_and_seniority,
+    extract_qualifications, extract_skills,
     calculate_skill_match_score, extract_education, extract_education_field,
     match_education, extract_job_seniority, match_seniority
 )
@@ -155,7 +155,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                 job_preferred = extract_qualifications(job_description)[1] if job_description else ""
                 job_skills = extract_skills(job_description, context='job_posting') if job_description else []
                 expected_education = extract_education(job_description) if job_description else []
-                job_level = extract_job_title_and_seniority(job_description)[1] if job_description else None
+                job_level = extract_job_seniority(job_description) if job_description else None
 
                 if uploaded_file:
                     is_pdf = (
@@ -305,17 +305,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     # Seniority Level Analysis
                     st.subheader("💼 Seniority Level Analysis")
                     
-                    # Extract job seniority - prioritize title extraction, fall back to full posting
-                    job_seniority = None
-                    if job_description:
-                        # First, try to extract from job title (more reliable)
-                        _, job_seniority_from_title = extract_job_title_and_seniority(job_description)
-                        
-                        # If title extraction found seniority, use that; otherwise search full posting
-                        if job_seniority_from_title:
-                            job_seniority = job_seniority_from_title
-                        else:
-                            job_seniority = extract_job_seniority(job_description)
+                    job_seniority = extract_job_seniority(job_description) if job_description else None
                     
                     # Extract seniority from resume (graduation-date check → LLM on job-header lines → grad-year math)
                     resume_seniority = extract_resume_seniority(resume_text=resume_text) if resume_text else None

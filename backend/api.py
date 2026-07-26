@@ -35,7 +35,6 @@ from backend.job_processor import (
     extract_education,
     extract_education_field,
     extract_job_seniority,
-    extract_job_title_and_seniority,
     extract_qualifications,
     extract_skills,
     map_skills_to_source,
@@ -604,14 +603,30 @@ def _extract_resume_text(upload: UploadFile) -> str:
 
     if is_pdf:
         try:
-            reader = PdfReader(io.BytesIO(raw))
-            pages = [p.extract_text() or "" for p in reader.pages]
+            import pdfplumber  # type: ignore
+
+            with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                pages = []
+                for page in pdf.pages:
+                    page_text = page.extract_text(
+                        layout=True,
+                        x_tolerance=1,
+                        y_tolerance=3,
+                    )
+                    if not page_text:
+                        page_text = page.extract_text() or ""
+                    pages.append(page_text)
             text = "\n".join(pages).strip()
         except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not read resume PDF: {exc}. Try re-saving the PDF and uploading again.",
-            )
+            try:
+                reader = PdfReader(io.BytesIO(raw))
+                pages = [p.extract_text() or "" for p in reader.pages]
+                text = "\n".join(pages).strip()
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Could not read resume PDF: {exc}. Try re-saving the PDF and uploading again.",
+                )
     elif is_word:
         try:
             doc = Document(io.BytesIO(raw))
@@ -753,13 +768,7 @@ async def analyze(
         job_skills = extract_skills(job_description_text, context="job_posting")
         job_required_education = extract_education(job_description_text)
         job_required_education_fields = extract_education_field(job_description_text)
-        # extract_job_seniority is the hybrid YoE+title pipeline (more accurate
-        # for edge cases like "AI Engineer I, 4+ years"). Only fall back to the
-        # title-only LLM extractor if the hybrid returns nothing.
-        job_seniority = (
-            extract_job_seniority(job_description_text)
-            or extract_job_title_and_seniority(job_description_text)[1]
-        )
+        job_seniority = extract_job_seniority(job_description_text)
     else:
         job_required, job_preferred = [], []
         job_skills = []
@@ -782,7 +791,7 @@ async def analyze(
                 tmp.write(resume_text)
                 tmp_path = tmp.name
 
-            chunks = rag.load_and_process_document(tmp_path, chunk_size=500, overlap=50)
+            chunks = rag.load_and_process_document(tmp_path)
             rag.create_vectorstore(chunks)
         finally:
             if tmp_path and os.path.exists(tmp_path):

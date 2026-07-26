@@ -188,7 +188,7 @@ function App() {
               onChange={(e) => {
                 const files = Array.from(e.target.files);
                 if (files.length > 4) {
-                  setError('You can only upload up to 4 images for the job description.');
+                  setError('You can only upload up to 4 images for the job description. Press the Clear button to reset and try again.');
                   return;
                 }
                 // Here you would handle the image files, e.g., send them to the backend for processing.

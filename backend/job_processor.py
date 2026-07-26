@@ -6,6 +6,7 @@ import os
 import json
 import logging
 from pathlib import Path
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 import spacy # type: ignore
 from difflib import SequenceMatcher
@@ -819,7 +820,6 @@ Include:
 Return a JSON object with fields 'required_skills' and 'preferred_skills' (both lists).
 Example: {"required_skills": ["Python", "Communication"], "preferred_skills": ["Docker"]}"""
 
-        from langchain_core.messages import HumanMessage, SystemMessage
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"Extract skills from this text:\n\n{text[:4000]}")
@@ -1113,7 +1113,6 @@ DO NOT include:
 Return a JSON object with field 'degrees' containing a list of extracted degree types.
 Example: {"degrees": ["Bachelor's", "Master's"]}"""
 
-        from langchain_core.messages import HumanMessage, SystemMessage
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"Extract degree types from this text:\n\n{text[:4000]}")
@@ -1187,7 +1186,6 @@ If the text says "Bachelor's degree" with NO specific field mentioned, return an
 
 Output format: {"education_fields": ["Field1", "Field2"]} or {"education_fields": []} if none required."""
 
-        from langchain_core.messages import HumanMessage, SystemMessage
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"Extract education fields/majors from this text:\n\n{text[:4000]}")
@@ -1613,8 +1611,6 @@ def extract_qualifications(text):
 
     try:
         model = ChatOpenAI(model="gpt-4o", temperature=0, timeout=60, max_retries=2)
-        from langchain_core.messages import HumanMessage, SystemMessage
-
         system_prompt = """You are a job posting qualification extraction expert.
 Extract only candidate qualifications from the job posting.
 
@@ -1763,93 +1759,174 @@ _LEADERSHIP_TITLE_KEYWORDS = (
     'head of', 'vp', 'vice president', 'chief',
 )
 
+_TITLE_SENIORITY_KEYWORDS = {
+    'entry-level': (
+        'intern', 'internship', 'junior', 'entry-level', 'entry level',
+        'new grad', 'new college grad', 'recent grad'
+    ),
+    'senior': ('senior', 'sr.'),
+    'lead/principal': (
+        'lead', 'principal', 'staff', 'architect', 'manager', 'director',
+        'head of', 'vp', 'vice president', 'chief'
+    ),
+}
+
 
 def _title_has_keyword(title, keywords):
     """Word-boundary-ish match: keyword appears as its own token in the title."""
     if not title:
         return False
-    t = f" {title.lower()} "
-    return any(f" {kw} " in t or t.startswith(f"{kw} ") or t.endswith(f" {kw}") for kw in keywords)
+    normalized = title.lower()
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(keyword.lower())}(?![a-z0-9])", normalized)
+        for keyword in keywords
+    )
 
 
-# Extract job title and seniority level
-def extract_job_title_and_seniority(text):
-    """Extract job title and seniority from a job posting.
+def _extract_job_title(text):
+    """Extract a job title from pasted/OCR job-description text.
 
-    Layer 1 - GPT-4o: reads the top of the posting and returns structured JSON.
-    Layer 2 - heuristic fallback: first-line title + seniority keyword scan.
+    Layer 1 removes obvious job-board/UI noise from the top of the posting.
+    Layer 2 returns explicit seniority-title lines before the LLM can drop them.
+    Layer 3 asks the LLM to extract the title from the cleaned top section.
+    Layer 4 uses conservative title-like line heuristics as a fallback.
     """
-    import re
+    if not text:
+        return None
 
-    _level_to_seniority = {
-        'intern': 'entry-level', 'entry': 'entry-level', 'junior': 'entry-level',
-        'new college grad': 'entry-level', 'recent grad': 'entry-level', 'I': 'entry-level',
-        'associate': 'mid-level', 'mid-level': 'mid-level', 'II': 'mid-level',
-        'III': 'senior', 'senior': 'senior', 'IV': 'senior',
-        'V': 'lead/principal', 'lead': 'lead/principal', 'principal': 'lead/principal',
-        'staff': 'lead/principal', 'VI': 'lead/principal', 'manager': 'lead/principal',
-        'director': 'lead/principal', 'vp': 'lead/principal', 'c-level': 'lead/principal',
+    noise_keywords = {
+        "about the job", "about us", "jobs", "apply", "save", "share", "send inmail",
+        "linkedin", "indeed", "posted", "reposted", "followers", "applicants",
+        "company", "overview", "benefits", "qualifications", "responsibilities",
+        "people also viewed", "promoted", "easy apply", "see who", "show more",
+        "meet the hiring team", "job activity", "report this job", "sign in",
+        "create job alert", "similar jobs", "view all jobs", "employment type",
+        "job function", "industries", "seniority level", "workplace type",
+        "full-time", "part-time", "contract", "temporary",
+        "on-site", "remote", "hybrid", "ago", "be among the first",
+        "years of experience", "year of experience", "minimum qualifications",
+        "preferred qualifications", "required qualifications", "basic qualifications",
+        "what you will be doing", "what we need to see", "ways to stand out",
     }
-    _valid_levels = {'entry-level', 'mid-level', 'senior', 'lead/principal'}
 
-    # -- Layer 1: LLM ----------------------------------------------------------
-    try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
-        system_prompt = """You are a job posting analyst. Extract the job title and seniority level from the top of the posting.
+    title_keywords = {
+        "engineer", "developer", "manager", "analyst", "specialist",
+        "architect", "scientist", "consultant", "designer", "intern",
+        "lead", "principal", "staff", "director", "coordinator", "associate",
+        "representative", "strategist", "administrator", "assistant", "fellow",
+        "researcher", "advisor", "officer", "owner", "producer", "editor",
+        "writer", "recruiter", "counselor", "technician", "operator",
+    }
 
-Seniority levels:
-- "entry-level" : 0-2 years experience, intern / graduate / junior roles
-- "mid-level"   : 3-5 years, associate / intermediate roles
-- "senior"      : 5-8 years, senior individual-contributor roles
-- "lead/principal": 9+ years OR management / leadership responsibility (manager, director, lead, principal, staff, architect, VP)
+    def clean_line(line):
+        return re.sub(r"\s+", " ", line).strip(" -|\u2022\t")
 
-Return ONLY valid JSON: {"job_title": "<title>", "seniority": "<level>"}
-Set seniority to null if it cannot be determined from the title alone."""
+    def is_noise_line(line):
+        normalized = line.lower()
+        if not normalized:
+            return True
+        if len(line) > 140:
+            return True
+        if any(noise in normalized for noise in noise_keywords):
+            return True
+        # Company/logo-ish OCR fragments are often one or two words with no role words.
+        if len(line.split()) <= 2 and not any(keyword in normalized for keyword in title_keywords):
+            return True
+        return False
 
-        from langchain_core.messages import HumanMessage, SystemMessage
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"Extract job title and seniority:\n\n{text[:600]}")
-        ]
-        response = model.invoke(messages)
-        json_match = re.search(r'\{.*?\}', response.content, re.DOTALL)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            job_title = parsed.get('job_title') or None
-            seniority = parsed.get('seniority') or None
-            if seniority not in _valid_levels:
-                seniority = None
-            if job_title:
-                return job_title, seniority
-    except Exception:
-        pass
+    def looks_like_title(line, require_keyword=True):
+        normalized = line.lower()
+        words = line.split()
+        if not words or len(words) > 10 or len(line) > 100:
+            return False
+        if is_noise_line(line):
+            return False
+        if normalized.startswith(("you will", "we are", "we're", "this role", "the role")):
+            return False
+        if not require_keyword:
+            return True
+        return any(keyword in normalized for keyword in title_keywords)
 
-    # -- Layer 2: heuristic fallback -------------------------------------------
-    job_title = None
-    seniority = None
-    first_line = text.split('\n')[0].strip()
-    if len(first_line) < 100:
-        job_title = first_line
-        for level in sorted(seniority_levels, key=len, reverse=True):
-            pattern = r'\b' + re.escape(level) + r'\b'
-            if re.search(pattern, job_title, re.IGNORECASE):
-                seniority = _level_to_seniority.get(level, level)
-                break
-    return job_title, seniority
+    def has_explicit_title_seniority(line):
+        normalized = line.lower()
+        words = line.split()
+        if not words or len(words) > 12 or len(line) > 120:
+            return False
+        if is_noise_line(line):
+            return False
+        if normalized.startswith(("you will", "we are", "we're", "this role", "the role", "if you", "with ")):
+            return False
+        return _seniority_from_title(line) is not None
+
+    lines = [clean_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    cleaned_top_lines = [line for line in lines[:40] if not is_noise_line(line)]
+    cleaned_top_text = "\n".join(cleaned_top_lines[:20]).strip()
+
+    # Layer 2: explicit seniority title line. This must happen before the LLM
+    # because the LLM may simplify "Senior Software Engineer" to "Software Engineer".
+    for line in cleaned_top_lines:
+        if has_explicit_title_seniority(line):
+            return line
+
+    # Layer 3: LLM title extraction from cleaned top content.
+    if cleaned_top_text:
+        try:
+            model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+            system_prompt = """You extract job titles from job postings.
+
+Return ONLY valid JSON in this exact format:
+{"job_title": "Senior Software Engineer"}
+
+Rules:
+- Extract the role title only.
+- Do not return company names, job-board UI text, locations, benefits, responsibilities, or paragraphs.
+- If no title is present, return {"job_title": null}."""
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=f"Extract the job title from this cleaned top section:\n\n{cleaned_top_text[:1200]}"),
+            ]
+            response = model.invoke(messages)
+            json_match = re.search(r"\{.*?\}", response.content, re.DOTALL)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                job_title = parsed.get("job_title")
+                if isinstance(job_title, str):
+                    job_title = clean_line(job_title)
+                    if looks_like_title(job_title, require_keyword=False):
+                        return job_title
+        except Exception:
+            pass
+
+    # Layer 4: conservative fallback heuristic.
+    for line in cleaned_top_lines:
+        if looks_like_title(line):
+            return line
+
+    return None
+
+
+def _seniority_from_title(title):
+    """Classify seniority from explicit title keywords only."""
+    if not title:
+        return None
+
+    for seniority, keywords in _TITLE_SENIORITY_KEYWORDS.items():
+        if _title_has_keyword(title, keywords):
+            return seniority
+    return None
 
 
 def extract_job_seniority(text):
     """Extract seniority level requirement from a job posting.
 
-    Hybrid pipeline (ordered by reliability):
-      Layer 1 - Years-of-experience regex (DETERMINISTIC, primary signal).
-                If the posting says "4+ years", it's mid-level regardless of
-                what the title says. This handles edge cases like
-                "AI Engineer I, 4+ years required" which the LLM gets wrong
-                because it over-weights the "I" in the title.
-      Layer 2 - GPT-4o (only when YoE is absent). Reads title + level keywords
-                to classify postings like "Senior Engineer" with no stated YoE.
-      Layer 3 - Rule-based keyword scan (final fallback if LLM unavailable).
+    Hybrid pipeline:
+      Layer 1 - Explicit title keywords, such as "Senior Engineer", are trusted.
+      Layer 2 - GPT-4o classifies unclear postings using title/context.
+      Layer 3 - Years-of-experience regex is used when the title/LLM has no explicit
+                seniority keyword.
+      Layer 4 - Rule-based keyword scan is the final fallback.
 
     Returns:
         str: One of 'entry-level', 'mid-level', 'senior', 'lead/principal', or None
@@ -1857,40 +1934,14 @@ def extract_job_seniority(text):
     if not text or not text.strip():
         return None
 
-    # -- Layer 0: Cheap intern-title short-circuit -----------------------------
-    # "Intern" in the title is unambiguous - always entry-level, regardless of
-    # YoE phrasing elsewhere in the posting (e.g. "0-2 years preferred"). We
-    # grab the first non-empty line directly to avoid the LLM call inside
-    # extract_job_title_and_seniority.
-    first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    if re.search(r'\bintern(ship)?\b', first_line, re.IGNORECASE):
-        return 'entry-level'
+    # -- Layer 1: explicit title seniority -------------------------------------
+    title = _extract_job_title(text)
+    title_seniority = _seniority_from_title(title)
+    if title_seniority:
+        return title_seniority
 
-    # -- Layer 1: Deterministic YoE extraction + title-keyword refinement ------
-    # YoE is the primary signal (ground truth when stated). We only need to
-    # consult the title to verify the high-end edge case:
-    #   \u2022 Roman-numeral suffixes (I, II, III) are paygrades - IGNORED.
-    #   \u2022 A 'lead/principal' YoE bucket REQUIRES a leadership keyword in the
-    #     title (lead, principal, staff, architect, manager, director, VP,
-    #     head of, chief). Otherwise we cap at 'senior' - e.g. an Anthropic
-    #     "Software Engineer, Safeguards" posting asking for "5-10+ years" is
-    #     a senior IC role, not a lead/principal one.
-    #
-    # OPTIMIZATION: only call extract_job_title_and_seniority (which itself
-    # makes an LLM call) when we land in the lead/principal bucket. For
-    # entry/mid/senior buckets, YoE alone is sufficient and we skip the call.
-    yoe = _extract_years_of_experience(text)
-    if yoe is not None:
-        bucket = _yoe_to_seniority(yoe)
-        if bucket != 'lead/principal':
-            return bucket
-
-        title, _ = extract_job_title_and_seniority(text)
-        if _title_has_keyword(title, _LEADERSHIP_TITLE_KEYWORDS):
-            return 'lead/principal'
-        return 'senior'
-
-    # -- Layer 2: LLM (only when YoE is absent) --------------------------------
+    # -- Layer 2: LLM ----------------------------------------------------------
+    llm_seniority = None
     try:
         model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
         system_prompt = """You are a job posting analyst. Classify the seniority level required by the posting into exactly one of these four categories:
@@ -1901,8 +1952,8 @@ def extract_job_seniority(text):
 - "lead/principal" : 10+ years AND explicit management / leadership responsibility
                      (manager, director, lead, principal, staff, architect, VP)
 
-This posting does NOT state explicit years of experience, so classify based on
-title and level keywords only:
+Classify based on the full posting, including title, level keywords, and stated
+years of experience when present:
 - "Junior X", "X Intern", "New Grad" -> entry-level
 - "X" or "X II" (no level prefix) -> mid-level
 - "Senior X", "Sr. X" -> senior
@@ -1913,7 +1964,6 @@ context), default to "mid-level".
 
 Return ONLY valid JSON: {"seniority": "<level>"}"""
 
-        from langchain_core.messages import HumanMessage, SystemMessage
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"Classify the seniority level for this job posting:\n\n{text[:3000]}")
@@ -1923,12 +1973,26 @@ Return ONLY valid JSON: {"seniority": "<level>"}"""
         if json_match:
             parsed = json.loads(json_match.group())
             llm_seniority = parsed.get('seniority')
-            if llm_seniority in {'entry-level', 'mid-level', 'senior', 'lead/principal'}:
-                return llm_seniority
+            if llm_seniority not in {'entry-level', 'mid-level', 'senior', 'lead/principal'}:
+                llm_seniority = None
     except Exception:
         pass
 
-    # -- Layer 3: rule-based fallback ------------------------------------------
+    if llm_seniority:
+        return llm_seniority
+
+    # -- Layer 3: deterministic YoE extraction + title-keyword refinement ------
+    yoe = _extract_years_of_experience(text)
+    if yoe is not None:
+        bucket = _yoe_to_seniority(yoe)
+        if bucket != 'lead/principal':
+            return bucket
+
+        if _title_has_keyword(title, _LEADERSHIP_TITLE_KEYWORDS):
+            return 'lead/principal'
+        return 'senior'
+
+    # -- Layer 4: rule-based fallback ------------------------------------------
     return _rule_based_job_seniority(text)
 
 def match_seniority(job_seniority, resume_seniority):
