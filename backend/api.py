@@ -50,7 +50,7 @@ from backend.rag_system import RAGSystem
 
 app = FastAPI(title="Job Application Helper API")
 DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
-_EASYOCR_READER = None
+_TESSERACT_CONFIGURED = False
 
 SUPPORTED_JOB_IMAGE_CONTENT_TYPES = {
     "image/jpeg",
@@ -491,24 +491,27 @@ Document:
         return
     
 
-def _get_easyocr_reader():
-    """Create the EasyOCR reader lazily so API startup stays lightweight."""
-    global _EASYOCR_READER
-    if _EASYOCR_READER is None:
-        try:
-            import easyocr  # type: ignore
-        except ImportError as exc:
-            raise HTTPException(
-                status_code=500,
-                detail="Image OCR is not available on this server. Please install easyocr.",
-            ) from exc
+def _configure_tesseract():
+    """Configure pytesseract lazily so API startup stays lightweight."""
+    global _TESSERACT_CONFIGURED
+    try:
+        import pytesseract  # type: ignore
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Image OCR is not available on this server. Please install pytesseract.",
+        ) from exc
 
-        _EASYOCR_READER = easyocr.Reader(["en"], gpu=False)
-    return _EASYOCR_READER
+    tesseract_cmd = os.getenv("TESSERACT_CMD")
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    _TESSERACT_CONFIGURED = True
+    return pytesseract
 
 
 def convert_image_input_to_text(image_file: UploadFile) -> str:
-    """Extract job-description text from an uploaded image using EasyOCR."""
+    """Extract job-description text from an uploaded image using pytesseract."""
     try:
         image_file.file.seek(0)
     except Exception:
@@ -538,22 +541,34 @@ def convert_image_input_to_text(image_file: UploadFile) -> str:
         )
 
     try:
-        import numpy as np
-        from PIL import Image
+        from PIL import Image, ImageOps
 
         image = Image.open(io.BytesIO(raw)).convert("RGB")
-        image_array = np.array(image)
-        reader = _get_easyocr_reader()
-        ocr_results = reader.readtext(image_array, detail=0, paragraph=True)
+        image = ImageOps.grayscale(image)
+        pytesseract = _configure_tesseract()
+        ocr_config = "--oem 3 --psm 6"
+        extracted_text = pytesseract.image_to_string(
+            image,
+            lang="eng",
+            config=ocr_config,
+            timeout=20,
+        )
     except HTTPException:
         raise
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=408,
+            detail=(
+                "Timed out while extracting text from the uploaded job description image. "
+                "Please upload a clearer image or paste the job description text directly."
+            ),
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Could not read text from the uploaded job description image: {exc}",
         ) from exc
 
-    extracted_text = "\n".join(str(item).strip() for item in ocr_results if str(item).strip())
     extracted_text = re.sub(r"\n{3,}", "\n\n", extracted_text).strip()
     print("Extracted job description text from image:", extracted_text[:200], "..." if len(extracted_text) > 200 else "")
     if len(extracted_text) < 50:

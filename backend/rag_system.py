@@ -5,6 +5,7 @@ Handles embeddings, vector storage, and document retrieval.
 import json
 import os
 import logging
+import re
 from dotenv import load_dotenv
 from langchain_community.vectorstores import Chroma  # type: ignore
 from langchain_core.documents import Document  # type: ignore
@@ -13,6 +14,8 @@ from langchain_core.tools import tool  # type: ignore
 from langchain_openai import ChatOpenAI
 from langchain_openai import OpenAIEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
+from langchain_community.retrievers import BM25Retriever  # type: ignore
+from sentence_transformers import CrossEncoder  # type: ignore
 
 load_dotenv()
 os.environ.setdefault("TIKTOKEN_CACHE_DIR", os.path.join(os.getcwd(), ".chroma_test"))
@@ -44,6 +47,7 @@ class RAGSystem:
         self.persist_directory = persist_directory
         self.embeddings = self._build_embeddings(embedding_backend)
         self.vectorstore = None
+        self.documents: list[Document] = []
         self.section_aliases = self._get_section_aliases()
         self.section_headers = [
             alias
@@ -54,6 +58,7 @@ class RAGSystem:
         self.section_pattern = self._build_section_pattern(self.section_headers)
         self.header_classification_cache: dict[str, str | None] = {}
         self.horizontal_rule_header_candidates: set[str] = set()
+        self.cross_encoder_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
     def _build_embeddings(self, embedding_backend: str):
         """Build embedding model. Auto mode prefers OpenAI if API key exists."""
@@ -181,26 +186,27 @@ class RAGSystem:
         # Repair collapsed multi-word section headers
         normalized_text = self.handle_multi_word_headers(normalized_text)
         return normalized_text
-    
-    def is_line_header_like(self, line: str, section_headers: list[str]) -> bool:
-        """Determine if a line resembles a section header."""
+
+    def classify_header_candidate(self, line: str, section_headers: list[str]) -> str:
+        """Classify a line as not_header, subsection, or top_level."""
         import re
 
         line = line.strip()
         if not line:
-            return False
+            return "not_header"
 
-        words = line.rstrip(":").split()
+        header_text = line.rstrip(":").strip()
+        words = header_text.split()
         if len(line) > 80 or len(words) > 6:
-            return False
-        if re.search(r"^\s*[-*•]\s+", line):
-            return False
+            return "not_header"
+        if re.search(r"^\s*[-*â€¢]\s+", line):
+            return "not_header"
         if re.search(r"[.!?;]$", line):
-            return False
+            return "not_header"
         if "@" in line or "http" in line.lower() or "www." in line.lower():
-            return False
+            return "not_header"
         if len(re.findall(r"\d", line)) > 2:
-            return False
+            return "not_header"
 
         action_verbs = {
             "built", "created", "developed", "implemented", "improved",
@@ -209,28 +215,28 @@ class RAGSystem:
         }
         first_word = words[0].lower().strip(":") if words else ""
         if first_word in action_verbs:
-            return False
-
-        # Check for exact match with known section headers
-        normalized_line = line.rstrip(":").strip().lower()
-        if any(normalized_line == header.lower() for header in section_headers):
-            return line.isupper() or line.istitle() or line.endswith(":")
-
-        # Check for common header patterns (e.g., all caps, ends with colon)
-        if line.isupper() or line.endswith(":"):
-            return True
+            return "not_header"
 
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9 &/+\-,:]*", line):
-            return False
+            return "not_header"
 
-        if line.istitle():
-            return True
+        normalized_line = header_text.lower()
+        is_known_header = any(normalized_line == header.lower() for header in section_headers)
+        is_top_level_format = header_text.isupper() or (not line.endswith(":") and header_text.istitle())
 
-        # Allow short lowercase/unknown headings such as "involvement".
+        if line.endswith(":"):
+            return "top_level" if header_text.isupper() else "subsection"
+
+        if is_known_header and is_top_level_format:
+            return "top_level"
+
+        if header_text.isupper() or header_text.istitle():
+            return "top_level"
+
         if len(words) <= 3 and all(len(word) > 2 for word in words):
-            return True
+            return "subsection"
 
-        return False
+        return "not_header"
 
     def _classify_compound_header_with_llm(self, header: str) -> str | None:
         """Classify compound resume headers containing connectors such as and, /, or &."""
@@ -311,8 +317,8 @@ class RAGSystem:
 
         return re.search(r"^(?:(?:and|or)\b|[&/|+])", line.strip(), re.IGNORECASE) is not None
 
-    def _get_section_aliases(self) -> dict[str, list[str]]:
-        """Return canonical resume section labels and the header aliases they accept."""
+    def _get_default_section_aliases(self) -> dict[str, list[str]]:
+        """Return fallback canonical resume section labels and known aliases."""
         return {
             "Education": [
                 "Education", "Academic Background", "Academic Qualifications",
@@ -354,6 +360,65 @@ class RAGSystem:
             "Contact": ["Contact"],
         }
 
+    def _get_section_aliases(self) -> dict[str, list[str]]:
+        """Return resume section aliases from the LLM, falling back to defaults."""
+        default_aliases = self._get_default_section_aliases()
+        canonical_sections = list(default_aliases.keys())
+
+        try:
+            model = ChatOpenAI(model="gpt-4o-mini", temperature=0, timeout=30, max_retries=1)
+            response = model.invoke(
+                [
+                    SystemMessage(
+                        content=(
+                            "You generate robust resume section-header aliases for a RAG chunking system. "
+                            "Return only valid JSON. Do not include explanations. "
+                            "The JSON object must use exactly the provided canonical section labels as keys. "
+                            "Each value must be a list of realistic resume header strings that should map to that section."
+                        )
+                    ),
+                    HumanMessage(
+                        content=(
+                            "Canonical section labels:\n"
+                            f"{json.dumps(canonical_sections)}\n\n"
+                            "Generate aliases that cover common resume formats, including singular/plural forms, "
+                            "academic/professional wording, compound headers, and common synonyms. "
+                            "Return JSON only."
+                            "Examples: {\"Education\": [\"Education\", \"Academic Background\", \"Academic Qualifications\"]}, " \
+                            "\"Skills\": [\"Skills\", \"Technical Skills\", \"Soft Skills\"]}"
+                        )
+                    ),
+                ]
+            )
+            json_match = re.search(r"\{.*\}", response.content, re.DOTALL)
+            if not json_match:
+                return default_aliases
+
+            parsed = json.loads(json_match.group())
+            if not isinstance(parsed, dict):
+                return default_aliases
+
+            aliases_by_section: dict[str, list[str]] = {}
+            for section in canonical_sections:
+                llm_aliases = parsed.get(section, [])
+                if not isinstance(llm_aliases, list):
+                    llm_aliases = []
+
+                cleaned_aliases = []
+                for alias in llm_aliases:
+                    if isinstance(alias, str):
+                        cleaned_alias = re.sub(r"\s+", " ", alias).strip()
+                        if cleaned_alias:
+                            cleaned_aliases.append(cleaned_alias)
+
+                aliases = [section] + cleaned_aliases + default_aliases[section]
+                aliases_by_section[section] = list(dict.fromkeys(aliases))
+
+            return aliases_by_section
+        except Exception as exc:
+            logger.debug("LLM section alias generation failed; using defaults. Error: %s", exc)
+            return default_aliases
+
     def _build_alias_to_section_map(self, section_aliases: dict[str, list[str]]) -> dict[str, str]:
         """Map each lowercase alias to its canonical section label."""
         return {
@@ -361,6 +426,13 @@ class RAGSystem:
             for section, aliases in section_aliases.items()
             for alias in aliases
         }
+
+    def cross_encoder_rerank(self, query: str, candidate_chunks: list[Document], top_k: int = 3) -> list[Document]:
+        """Rerank candidate chunks using a cross-encoder model for better relevance."""
+        pairs = [(query, chunk.page_content) for chunk in candidate_chunks]
+        relevance_scores = self.cross_encoder_model.predict(pairs)
+        scored_chunks = sorted(list(zip(candidate_chunks, relevance_scores)), reverse=True, key=lambda x: x[1])
+        return [chunk for chunk, _ in scored_chunks[:top_k]]
 
     def _build_section_pattern(self, section_headers: list[str]) -> str:
         """Build the escaped regex pattern for known section headers."""
@@ -399,22 +471,6 @@ class RAGSystem:
 
         return self._classify_compound_header_with_llm(line)
 
-    def _has_top_level_header_format(self, line: str) -> bool:
-        """Return whether a header line looks like a top-level resume section."""
-        stripped = line.strip()
-        if not stripped:
-            return False
-
-        header_text = stripped.rstrip(":").strip()
-        words = header_text.split()
-        if len(words) > 8:
-            return False
-
-        if stripped.endswith(":"):
-            return header_text.isupper()
-
-        return header_text.isupper() or header_text.istitle()
-
     def _is_section_boundary_line(
         self,
         line: str,
@@ -428,26 +484,24 @@ class RAGSystem:
             return False
 
         normalized_line = line.rstrip(":").strip().lower()
+        candidate_type = self.classify_header_candidate(line, section_headers)
         if (
             normalized_line in getattr(self, "horizontal_rule_header_candidates", set())
-            and self._has_top_level_header_format(line)
+            and candidate_type == "top_level"
         ):
             return True
 
-        if normalized_line in alias_to_section and self._has_top_level_header_format(line):
+        if normalized_line in alias_to_section and candidate_type == "top_level":
             return True
 
         exact_header = any(
             re.search(f'(?i)^\\s*{re.escape(header)}\\s*:?\\s*$', line)
             for header in section_headers
         )
-        if exact_header and self._has_top_level_header_format(line):
+        if exact_header and candidate_type == "top_level":
             return True
 
-        if not self.is_line_header_like(line, section_headers):
-            return False
-
-        if not self._has_top_level_header_format(line):
+        if candidate_type != "top_level":
             return False
 
         if self.classify_compound_header(line):
@@ -472,7 +526,7 @@ class RAGSystem:
         if not self._starts_with_header_connector(current_line):
             return False
 
-        if not self.is_line_header_like(previous_line, section_headers):
+        if self.classify_header_candidate(previous_line, section_headers) == "not_header":
             return False
 
         combined_header = f"{previous_line} {current_line}"
@@ -498,7 +552,7 @@ class RAGSystem:
         if matched_header:
             return alias_to_section.get(matched_header.lower(), matched_header)
 
-        if self.is_line_header_like(first_line, section_headers):
+        if self.classify_header_candidate(first_line, section_headers) != "not_header":
             compound_section = self.classify_compound_header(first_line)
             if compound_section:
                 return compound_section
@@ -631,23 +685,49 @@ class RAGSystem:
 
         if not valid_chunks:
             raise ValueError("No valid chunks to create vectorstore (all chunks are empty)")
-        
+
+        self.documents = valid_chunks
         self.vectorstore = Chroma.from_documents(
-            valid_chunks,
-            self.embeddings,
+            documents=valid_chunks,
+            embedding=self.embeddings,
             collection_name=self.collection_name,
             persist_directory=self.persist_directory,
         )
 
-    def retrieve_relevant_chunks(self, query: str, top_k: int = 5):
+    def retrieve_relevant_chunks(self, query: str, top_k: int = 3):
         """Retrieve relevant document chunks based on a query, sorted by document order."""
         if not self.vectorstore:
             raise ValueError("Vector store not created. Please load and process a document first.")
-        
-        relevant_chunks = self.vectorstore.similarity_search(query, k=top_k)
-        # Return in original document order
-        relevant_chunks.sort(key=lambda doc: doc.metadata.get("chunk_index", 0))
-        return relevant_chunks
+
+        #Access all chunks for RRF scoring, then filter to top_k after sorting by document order
+        candidate_k = len(self.documents)
+        bm25_retriever = BM25Retriever.from_documents(self.documents, k=candidate_k)
+        bm25_results = bm25_retriever.invoke(query)
+        vector_results = self.vectorstore.similarity_search(query=query, k=candidate_k)
+
+        rrf_results_for_bm25 = []  # Stores key value pairs of (Document, RRF score) for BM25 results
+        for rank, key in enumerate(bm25_results, start=1):
+            rrf_score = 1 / (60 + rank)  #60 is a constant k used in production
+            rrf_results_for_bm25.append((key, rrf_score))
+
+        rrf_results_for_vector = []
+        for rank, key in enumerate(vector_results, start=1):
+            rrf_score = 1 / (60 + rank) #60 is a constant k used in production
+            rrf_results_for_vector.append((key, rrf_score))
+
+        combined_results: dict[int, tuple[Document, float]] = {}
+        all_rrf_results = rrf_results_for_bm25 + rrf_results_for_vector
+        for doc, score in all_rrf_results:
+            chunk_index = doc.metadata.get("chunk_index")
+            if chunk_index is not None:
+                if chunk_index in combined_results:
+                    existing_doc, existing_score = combined_results[chunk_index]
+                    combined_results[chunk_index] = (existing_doc, existing_score + score)
+                else:
+                    combined_results[chunk_index] = (doc, score)
+
+        ranked_chunks = [doc for doc, _ in sorted(combined_results.values(), key=lambda x: x[1], reverse=True)]
+        return self.cross_encoder_rerank(query, ranked_chunks, top_k=top_k)
 
     def ingest_file(self, file_path: str):
         """Convenience method for tests: load, split, and index a file in one call."""
@@ -666,7 +746,8 @@ def create_retrieve_resume_tool(rag_instance: RAGSystem):
     @tool
     def retrieve_resume_context(query: str) -> str:
         """Retrieve relevant resume sections for the given query."""
-        chunks = rag_instance.retrieve_relevant_chunks(query, top_k=5)
+        chunks = rag_instance.retrieve_relevant_chunks(query, top_k=3)
+        print(f"Top chunk retrieved for query '{query}': {chunks[0].page_content[:100]}..." if chunks else "No chunks retrieved.")
         if not chunks:
             return "No relevant information found in the resume."
         return "\n\n".join([chunk.page_content for chunk in chunks])
@@ -674,78 +755,87 @@ def create_retrieve_resume_tool(rag_instance: RAGSystem):
     return retrieve_resume_context
 
 def main():
-    """Run the all-resumes local RAG debug test."""
-    main_all_resumes()
-
-
-def main_all_resumes():
-    """Run a local RAG debug test against every resume in tests/resumes by default."""
-    import sys
+    """Test selected resumes with comparison-oriented retrieval tasks."""
     from pathlib import Path
 
     if not logger.handlers:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     quiet_third_party_http_logs()
 
-    supported_suffixes = {".pdf", ".txt", ".doc", ".docx"}
-    target = (
-        Path(sys.argv[1])
-        if len(sys.argv) > 1
-        else Path("tests/resumes")
-    )
-
-    if target.is_dir():
-        resume_paths = sorted(
-            path for path in target.iterdir()
-            if path.is_file() and path.suffix.lower() in supported_suffixes
-        )
-    elif target.is_file() and target.suffix.lower() in supported_suffixes:
-        resume_paths = [target]
-    else:
-        logger.error("Resume target not found or unsupported. Usage: python -m backend.rag_system [resume_file_or_folder]")
-        return
-
-    if not resume_paths:
-        logger.error("No supported resumes found in target folder")
-        return
-
-    retrieval_checks = [
-        (
-            "Education",
-            "education degree major university",
-            {"Education"},
-        ),
-        (
-            "Skills",
-            "technical skills programming languages frameworks cloud",
-            {"Skills", "Projects", "Experience"},
-        ),
-        (
-            "Experience",
-            "work experience companies roles internships",
-            {"Experience"},
-        ),
-        (
-            "Projects",
-            "projects machine learning software engineering",
-            {"Projects"},
-        ),
+    resume_dir = Path("tests/resumes")
+    retrieval_tests = [
+        {
+            "task": "education_evidence",
+            "query": "degree major field of study university coursework education bachelor",
+            "expected_sections": {"Education"},
+        },
+        {
+            "task": "skills_evidence",
+            "query": "programming languages frameworks tools technologies technical skills",
+            "expected_sections": {"Skills", "Projects", "Experience"},
+        },
+        {
+            "task": "project_evidence",
+            "query": "projects applications websites software systems implementation development",
+            "expected_sections": {"Projects"},
+        },
+        {
+            "task": "leadership_evidence",
+            "query": "leadership extracurriculars organizations activities volunteer clubs involvement",
+            "expected_sections": {"Leadership"},
+        },
+        {
+            "task": "experience_evidence",
+            "query": "work experience employers companies roles responsibilities internship professional experience",
+            "expected_sections": {"Experience", "Leadership"},
+        },
+        {
+            "task": "certification_or_awards_evidence",
+            "query": "certifications certificates awards honors scholarships coursework programs",
+            "expected_sections": {"Certifications", "Education", "Leadership"},
+        },
+    ]
+    resume_tests = [
+        {"name": "Isabella", "resume_match": "Isabella"},
     ]
 
-    logger.info("Testing RAG against %d resume(s)", len(resume_paths))
-    for resume_index, resume_path in enumerate(resume_paths, start=1):
-        logger.info("\n" + "="*70)
-        logger.info("Resume %d/%d: %s", resume_index, len(resume_paths), resume_path.name)
+    def find_resume(match_text: str) -> Path | None:
+        supported_suffixes = {".pdf", ".txt", ".doc", ".docx"}
+        normalized_match = match_text.lower()
+        for path in sorted(resume_dir.iterdir()):
+            if (
+                path.is_file()
+                and path.suffix.lower() in supported_suffixes
+                and normalized_match in path.name.lower()
+            ):
+                return path
+        return None
 
-        rag = RAGSystem(collection_name=f"debug_resume_{resume_index}")
-        try:
-            text_chunks = rag.load_and_process_document(str(resume_path))
-        except Exception as exc:
-            logger.warning("Could not load/process resume; skipping. Error: %s", exc)
+    logger.info("=" * 70)
+    logger.info("Testing %d resumes with comparison-oriented RAG retrieval", len(resume_tests))
+
+    for resume_index, resume_test in enumerate(resume_tests, start=1):
+        resume_path = find_resume(resume_test["resume_match"])
+        logger.info("\n" + "=" * 70)
+        logger.info("Resume %d/%d: %s", resume_index, len(resume_tests), resume_test["name"])
+        logger.info("Resume match: %s", resume_test["resume_match"])
+
+        if not resume_path:
+            logger.error("Resume not found in %s", resume_dir)
             continue
 
-        logger.info("Final chunk mapping")
-        for chunk_index, (chunk_text, section) in enumerate(text_chunks):
+        logger.info("Resume: %s", resume_path.name)
+        safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", resume_test["name"].lower()).strip("._-")
+        rag = RAGSystem(collection_name=f"debug_{safe_name}_rag")
+
+        try:
+            chunks = rag.load_and_process_document(str(resume_path))
+        except Exception as exc:
+            logger.error("Structure-aware chunking failed. Error: %s", exc)
+            continue
+
+        logger.info("\nStructure-aware chunks")
+        for chunk_index, (chunk_text, section) in enumerate(chunks):
             first_line = chunk_text.splitlines()[0].strip() if chunk_text.splitlines() else ""
             logger.info(
                 "- chunk_index=%s section=%s first_line=%r chars=%d",
@@ -754,39 +844,50 @@ def main_all_resumes():
                 first_line,
                 len(chunk_text),
             )
-        logger.info("Total chunks: %d", len(text_chunks))
 
-        rag.create_vectorstore(text_chunks)
+        try:
+            rag.create_vectorstore(chunks)
+        except Exception as exc:
+            logger.error("Vectorstore creation failed. Error: %s", exc)
+            continue
 
-        logger.info("\nRetrieval diagnostics")
-        for label, query, expected_sections in retrieval_checks:
-            retrieved_chunks = rag.retrieve_relevant_chunks(query, top_k=3)
+        logger.info("\nRetrieval evidence tests")
+        for test_index, test in enumerate(retrieval_tests, start=1):
+            logger.info("\n" + "-" * 70)
+            logger.info("Task %d/%d: %s", test_index, len(retrieval_tests), test["task"])
+            logger.info("Query: %s", test["query"])
+            logger.info("Expected sections: %s", sorted(test["expected_sections"]))
+
+            try:
+                relevant_chunks = rag.retrieve_relevant_chunks(test["query"], top_k=3)
+            except Exception as exc:
+                logger.error("Retrieval failed. Error: %s", exc)
+                continue
+
             returned_sections = [
                 chunk.metadata.get("section", "Unknown")
-                for chunk in retrieved_chunks
+                for chunk in relevant_chunks
             ]
-            unexpected_sections = [
-                section
-                for section in returned_sections
-                if section not in expected_sections
-            ]
-            status = "OK" if not unexpected_sections else "REVIEW"
-            logger.info(
-                "- %s query: %s | expected=%s | returned=%s | status=%s",
-                label,
-                query,
-                sorted(expected_sections),
-                returned_sections,
-                status,
-            )
-            if unexpected_sections:
-                logger.info(
-                    "  possible issue: retrieved %s outside expected sections %s",
-                    unexpected_sections,
-                    sorted(expected_sections),
-                )
 
-    logger.info("="*70)
+            status = "PASS" if any(section in test["expected_sections"] for section in returned_sections) else "REVIEW"
+            logger.info("Returned sections: %s", returned_sections)
+            logger.info("Status: %s", status)
+
+            for result_index, chunk in enumerate(relevant_chunks, start=1):
+                chunk_lines = chunk.page_content.splitlines()
+                first_line = chunk_lines[0].strip() if chunk_lines else ""
+                preview = " ".join(chunk.page_content.split())[:350]
+                logger.info(
+                    "- result=%s chunk_index=%s section=%s first_line=%r chars=%d",
+                    result_index,
+                    chunk.metadata.get("chunk_index"),
+                    chunk.metadata.get("section"),
+                    first_line,
+                    len(chunk.page_content),
+                )
+                logger.info("  evidence preview: %s", preview)
+
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

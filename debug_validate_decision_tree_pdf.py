@@ -33,24 +33,27 @@ def _install_api_import_stubs() -> None:
     agent_stub.generate_resume_feedback_prompt = lambda *args, **kwargs: ""
     agent_stub.run_agent_analysis = lambda *args, **kwargs: ""
 
-    nlp_stub = types.ModuleType("backend.nlp_processor")
+    job_processor_stub = types.ModuleType("backend.job_processor")
     for name in [
         "calculate_skill_match_score",
-        "extract_education_field_with_llm",
-        "extract_education_with_llm",
+        "extract_education",
+        "extract_education_field",
         "extract_job_seniority",
-        "extract_job_title_and_seniority",
         "extract_qualifications",
-        "extract_resume_education_degree",
-        "extract_resume_education_field",
-        "extract_resume_seniority",
-        "extract_resume_skills",
-        "extract_skills_with_llm",
+        "extract_skills",
         "map_skills_to_source",
         "match_education",
         "match_seniority",
     ]:
-        setattr(nlp_stub, name, lambda *args, **kwargs: [] if "extract" in name else {})
+        setattr(job_processor_stub, name, lambda *args, **kwargs: [] if "extract" in name else {})
+
+    resume_processor_stub = types.ModuleType("backend.resume_processor")
+    for name in [
+        "extract_resume_education_degree",
+        "extract_resume_education_field",
+        "extract_resume_seniority",
+    ]:
+        setattr(resume_processor_stub, name, lambda *args, **kwargs: [])
 
     rag_stub = types.ModuleType("backend.rag_system")
 
@@ -69,7 +72,8 @@ def _install_api_import_stubs() -> None:
     rag_stub.RAGSystem = _StubRAGSystem
 
     sys.modules.setdefault("backend.agent", agent_stub)
-    sys.modules.setdefault("backend.nlp_processor", nlp_stub)
+    sys.modules.setdefault("backend.job_processor", job_processor_stub)
+    sys.modules.setdefault("backend.resume_processor", resume_processor_stub)
     sys.modules.setdefault("backend.rag_system", rag_stub)
 
 

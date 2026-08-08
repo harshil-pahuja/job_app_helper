@@ -645,6 +645,7 @@ Based on this analysis, please provide feedback ONLY in the following structured
 
 **General Suggestions for Resumé Improvement**
    If special cases were identified (weak action verbs, missing metrics, repetitive verbs, over/underqualification, education mismatch), provide specific recommendations for how to address them in the resumé. Include examples of how to rewrite bullets or reframe experience to better align with the job description.
+   If a bullet point does not follow the XYZ formula (e.g., "Accomplished X by doing Y, resulting in Z"), suggest how to rewrite it to follow this structure.
    If no special cases were identified, provide 1-2 general suggestions for improving the resumé's impact and clarity.
    Use bullet points for each suggested improvement, NOT paragraphs. Be concise and specific.
    

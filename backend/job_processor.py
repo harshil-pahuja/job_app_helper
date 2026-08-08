@@ -2,26 +2,18 @@
 Job-processing utilities for job description analysis, extraction, and matching.
 """
 import re
-import os
 import json
-import logging
 from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 import spacy # type: ignore
 from difflib import SequenceMatcher
 from dotenv import load_dotenv  # type: ignore
-from langchain.chat_models import init_chat_model  # type: ignore
 
 # Load environment variables
 load_dotenv()
 
 nlp = spacy.load("en_core_web_sm")
-logger = logging.getLogger(__name__)
-
-# Load sample text from file
-sample_file = Path(__file__).parent.parent / "tests" / "sample_company.txt"
-text = sample_file.read_text(encoding="utf-8") if sample_file.exists() else ""
 
 compensation_keywords = {
     'salary', 'equity', 'bonus', 'pto', 'benefits', 
@@ -95,21 +87,6 @@ descriptor_words = {
     'experience', 'expertise', 'knowledge', 'understanding'
 }
 
-# Abstract phrases that are often too generic to count as concrete skills
-abstract_skill_phrases = {
-    'data pipelines',
-    'data platforms',
-    'real-time analytics',
-    'cloud platforms',
-    'database schemas',
-    'machine learning workflows',
-    'software design patterns',
-    'solid principles',
-    'event streaming platforms',
-    'data science tools',
-    'system architecture',
-}
-
 # Canonical aliases so UI output and matching are cleaner and less repetitive.
 skill_aliases = {
     'github': 'git',
@@ -170,11 +147,6 @@ industries = {
     'manufacturing', 'education', 'transportation', 'real estate'
 }
 
-# Company descriptors
-company_descriptors = {
-    'fortune 500', 'startup', 'enterprises', 'hypergrowth', 'fast-growing'
-}
-
 # Time references
 time_references = {
     'january', 'february', 'march', 'april', 'may', 'june', 'july',
@@ -209,29 +181,6 @@ generic_patterns = [
     r'\bcomputer\s+(science|science)',  # "computer science" (academic field)
     r'analytical\s+workload',    # "analytical workloads" (vague)
 ]
-
-# Look for common seniority indicators
-seniority_levels = {
-    'intern', 'entry', 'junior', 'associate', 'mid-level', 'senior', 
-    'lead', 'principal', 'manager', 'director', 'vp', 'c-level', 'new college grad', 'recent grad', 'I', 'II', 'III', 'IV', 'V', 'VI'
-}
-
-def preprocess_text(text):
-    text = text.lower()
-
-    # remove punctuation
-    text = re.sub(r'[^\w\s]', '', text)
-
-    # tokenize
-    doc = nlp(text)
-
-    tokens = []
-
-    for token in doc:
-        if not token.is_stop and not token.is_space:
-            tokens.append(token.lemma_)
-
-    return tokens
 
 # Helper function to filter out compensation-related phrases from skill extraction
 def is_compensation(skill):
@@ -342,9 +291,6 @@ def is_meta_language(skill):
     if is_vague_descriptor(skill):
         return True
 
-    # Filter abstract, non-concrete skill phrases
-    if skill_lower in abstract_skill_phrases:
-        return True
     if re.match(r'^(data|cloud|software|system|machine learning|event streaming|database)\s+(pipelines?|platforms?|analytics|workflows?|architecture|patterns?|principles|schemas|tools?)$', skill_lower):
         return True
     
@@ -362,10 +308,6 @@ def is_meta_language(skill):
     
     # Check industries
     if any(ind in skill_lower for ind in industries):
-        return True
-    
-    # Check company descriptors
-    if any(comp in skill_lower for comp in company_descriptors):
         return True
     
     # Check time references
@@ -750,15 +692,18 @@ def calculate_skill_match_score_advanced(job_skills, resume_source, fuzzy_thresh
 
 def _extract_soft_skills(text):
     """
-    Extract soft skills from text using pattern matching.
+    Extract soft skills using LLM as primary and regex as supplemental fallback.
     Soft skills are interpersonal and professional competencies.
     
     Returns:
         set: Set of soft skills found in the text
     """
+    if not text or not text.strip():
+        return set()
+
     soft_skills = set()
     
-    # Common soft skills and their variations
+    # Common soft skills and their regex variations
     soft_skill_patterns = {
         # \b = word boundary to avoid partial matches (e.g., "communicative" shouldn't match "communication" skill)
         'Communication': r'\b(communication|communicat(ing|ion|e)|speaking|presentation|verbal|written|writing|interpersonal)\b',
@@ -772,7 +717,42 @@ def _extract_soft_skills(text):
         'Creativity': r'\b(creativ|innovation|innovative|design\s+thinking|think\s+outside)\b',
         'Attention to Detail': r'\b(attention\s+to\s+detail|meticulous|detail[- ]oriented|quality)\b',
     }
+
+    allowed_soft_skills = sorted(soft_skill_patterns.keys())
+
+    # Primary: LLM extraction constrained to canonical categories.
+    try:
+        model = ChatOpenAI(model='gpt-4o', temperature=0, timeout=60, max_retries=2)
+        system_prompt = f"""You are a strict soft-skills extractor.
+
+Extract soft/professional skills from the provided text.
+Return ONLY valid JSON in this format:
+{{"soft_skills": ["Communication", "Leadership"]}}
+
+Allowed values (use only these exact labels): {', '.join(allowed_soft_skills)}
+
+Rules:
+- Include a label only when the text clearly indicates it.
+- Do not invent skills.
+- Do not return skills outside the allowed list.
+- If none are present, return {{"soft_skills": []}}."""
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"Extract soft skills from this text:\n\n{text[:4000]}")
+        ]
+        response = model.invoke(messages)
+        json_match = re.search(r'\{.*\}', response.content, re.DOTALL)
+        if json_match:
+            parsed = json.loads(json_match.group())
+            for skill in parsed.get('soft_skills', []):
+                skill_name = str(skill).strip()
+                if skill_name in soft_skill_patterns:
+                    soft_skills.add(skill_name)
+    except Exception:
+        pass
     
+    # Supplemental: regex pass keeps existing deterministic behavior.
     text_lower = text.lower()
     
     for skill_name, pattern in soft_skill_patterns.items():
@@ -839,7 +819,7 @@ Example: {"required_skills": ["Python", "Communication"], "preferred_skills": ["
                 if 2 <= len(skill) <= 100 and not is_generic(skill) and not is_meta_language(skill):
                     llm_skills.add(canonicalize_skill(skill))
     except Exception:
-        logger.warning("LLM skill extraction failed; using regex/spaCy extraction")
+        pass
 
     # STEP 1: Strip company culture/mission sections to avoid extracting mission language as skills
     text = strip_company_culture_sections(text)
@@ -1783,6 +1763,96 @@ def _title_has_keyword(title, keywords):
     )
 
 
+def _seniority_from_roman_numeral(title):
+    """Map Roman numeral title levels to seniority buckets, ignoring I."""
+    if not title:
+        return None
+
+    match = re.search(r"(?<![a-z0-9])(ii|iii|iv|v|vi|vii|viii|ix|x)(?![a-z0-9])", title.lower())
+    if not match:
+        return None
+
+    numeral = match.group(1)
+    if numeral == 'ii':
+        return 'mid-level'
+    if numeral in {'iii', 'iv'}:
+        return 'senior'
+    return 'lead/principal'
+
+
+def _explicit_title_seniority_candidate(line, is_noise_line=None):
+    """Return seniority if a line is safe to treat as an explicit seniority title."""
+    if not line:
+        return None
+
+    normalized = line.lower()
+    words = line.split()
+    if not words or len(words) > 12 or len(line) > 120:
+        return None
+    if is_noise_line and is_noise_line(line):
+        return None
+    if normalized.startswith(("you will", "we are", "we're", "this role", "the role", "if you", "with ")):
+        return None
+    if normalized.endswith((".", ":", ";")):
+        return None
+
+    return _seniority_from_title(line)
+
+
+def split_posting_into_sections(text, include_preamble=False):
+    """Split a job posting into sections based on common headings.
+
+    Returns:
+        dict: mapping of section name to section text.
+        If include_preamble=True, includes "__preamble__" with text before the first section.
+    """
+    if not text:
+        return {}
+
+    # Common section headings in job postings
+    section_headings = [
+        'about the company', 'about us', 'company overview', 'company description',
+        'full job description', 'job description', 'about the job', 'about this job',
+        'about the role', 'about this role', 'role overview', 'role summary',
+        'summary', 'overview', 'responsibilities', 'what you will do',
+        "what you'll do", 'what you will be doing', "what you'll be doing",
+        'what we need to see', 'qualifications', 'requirements', 'skills required',
+        'minimum qualifications', 'basic qualifications', 'preferred qualifications',
+        'required qualifications', 'benefits', 'perks', 'compensation', 'salary',
+        'ways to stand out', 'how to apply', 'application process',
+        'equal opportunity employer'
+    ]
+
+    # Create a regex pattern to match headings
+    heading_pattern = r'^\s*(?:' + '|'.join(re.escape(h) for h in section_headings) + r')\s*[:\-]?\s*$'
+    heading_regex = re.compile(heading_pattern, re.IGNORECASE | re.MULTILINE)
+
+    sections = {}
+    current_section = None
+    current_text = []
+    preamble_lines = []  # Text before the first recognized section heading
+
+    for line in text.splitlines():
+        if heading_regex.match(line):
+            if include_preamble and current_section is None and preamble_lines:
+                sections["__preamble__"] = '\n'.join(preamble_lines).strip()
+            if current_section and current_text:
+                sections[current_section] = '\n'.join(current_text).strip()
+            current_section = line.strip().lower()
+            current_text = []
+        else:
+            if current_section:
+                current_text.append(line)
+            elif include_preamble:
+                preamble_lines.append(line)
+
+    if current_section and current_text:
+        sections[current_section] = '\n'.join(current_text).strip()
+    elif include_preamble and preamble_lines and "__preamble__" not in sections:
+        sections["__preamble__"] = '\n'.join(preamble_lines).strip()
+
+    return sections
+
 def _extract_job_title(text):
     """Extract a job title from pasted/OCR job-description text.
 
@@ -1809,15 +1879,6 @@ def _extract_job_title(text):
         "what you will be doing", "what we need to see", "ways to stand out",
     }
 
-    title_keywords = {
-        "engineer", "developer", "manager", "analyst", "specialist",
-        "architect", "scientist", "consultant", "designer", "intern",
-        "lead", "principal", "staff", "director", "coordinator", "associate",
-        "representative", "strategist", "administrator", "assistant", "fellow",
-        "researcher", "advisor", "officer", "owner", "producer", "editor",
-        "writer", "recruiter", "counselor", "technician", "operator",
-    }
-
     def clean_line(line):
         return re.sub(r"\s+", " ", line).strip(" -|\u2022\t")
 
@@ -1829,25 +1890,9 @@ def _extract_job_title(text):
             return True
         if any(noise in normalized for noise in noise_keywords):
             return True
-        # Company/logo-ish OCR fragments are often one or two words with no role words.
-        if len(line.split()) <= 2 and not any(keyword in normalized for keyword in title_keywords):
-            return True
         return False
 
-    def looks_like_title(line, require_keyword=True):
-        normalized = line.lower()
-        words = line.split()
-        if not words or len(words) > 10 or len(line) > 100:
-            return False
-        if is_noise_line(line):
-            return False
-        if normalized.startswith(("you will", "we are", "we're", "this role", "the role")):
-            return False
-        if not require_keyword:
-            return True
-        return any(keyword in normalized for keyword in title_keywords)
-
-    def has_explicit_title_seniority(line):
+    def has_title_shape(line):
         normalized = line.lower()
         words = line.split()
         if not words or len(words) > 12 or len(line) > 120:
@@ -1856,9 +1901,16 @@ def _extract_job_title(text):
             return False
         if normalized.startswith(("you will", "we are", "we're", "this role", "the role", "if you", "with ")):
             return False
-        return _seniority_from_title(line) is not None
+        if normalized.endswith((".", ":", ";")):
+            return False
+        if re.search(r"\b\d+\+?\s+years?\b", normalized):
+            return False
+        return True
 
-    lines = [clean_line(line) for line in text.splitlines()]
+    sections = split_posting_into_sections(text, include_preamble=True)
+    title_source_text = sections.get("__preamble__", text)
+
+    lines = [clean_line(line) for line in title_source_text.splitlines()]
     lines = [line for line in lines if line]
     cleaned_top_lines = [line for line in lines[:40] if not is_noise_line(line)]
     cleaned_top_text = "\n".join(cleaned_top_lines[:20]).strip()
@@ -1866,7 +1918,7 @@ def _extract_job_title(text):
     # Layer 2: explicit seniority title line. This must happen before the LLM
     # because the LLM may simplify "Senior Software Engineer" to "Software Engineer".
     for line in cleaned_top_lines:
-        if has_explicit_title_seniority(line):
+        if _explicit_title_seniority_candidate(line, is_noise_line):
             return line
 
     # Layer 3: LLM title extraction from cleaned top content.
@@ -1894,14 +1946,15 @@ Rules:
                 job_title = parsed.get("job_title")
                 if isinstance(job_title, str):
                     job_title = clean_line(job_title)
-                    if looks_like_title(job_title, require_keyword=False):
+                    if has_title_shape(job_title):
                         return job_title
         except Exception:
             pass
 
-    # Layer 4: conservative fallback heuristic.
+    # Layer 4: conservative fallback heuristic. Without hardcoded role terms,
+    # only return short, clean preamble lines and let the LLM handle broad titles.
     for line in cleaned_top_lines:
-        if looks_like_title(line):
+        if has_title_shape(line):
             return line
 
     return None
@@ -1915,6 +1968,9 @@ def _seniority_from_title(title):
     for seniority, keywords in _TITLE_SENIORITY_KEYWORDS.items():
         if _title_has_keyword(title, keywords):
             return seniority
+    roman_seniority = _seniority_from_roman_numeral(title)
+    if roman_seniority:
+        return roman_seniority
     return None
 
 
@@ -1923,10 +1979,12 @@ def extract_job_seniority(text):
 
     Hybrid pipeline:
       Layer 1 - Explicit title keywords, such as "Senior Engineer", are trusted.
-      Layer 2 - GPT-4o classifies unclear postings using title/context.
-      Layer 3 - Years-of-experience regex is used when the title/LLM has no explicit
-                seniority keyword.
-      Layer 4 - Rule-based keyword scan is the final fallback.
+    Layer 2 - Non-I Roman numerals in the title, such as "Engineer II", map
+            to tiered levels (II=mid-level, III/IV=senior, V+=lead/principal)
+            unless a stronger explicit title keyword is present.
+      Layer 3 - GPT-4o classifies unclear postings using title/context.
+      Layer 4 - Years-of-experience regex is used when earlier layers do not decide.
+      Layer 5 - Rule-based keyword scan is the final fallback.
 
     Returns:
         str: One of 'entry-level', 'mid-level', 'senior', 'lead/principal', or None
@@ -1940,7 +1998,7 @@ def extract_job_seniority(text):
     if title_seniority:
         return title_seniority
 
-    # -- Layer 2: LLM ----------------------------------------------------------
+    # -- Layer 3: LLM ----------------------------------------------------------
     llm_seniority = None
     try:
         model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
@@ -1955,7 +2013,8 @@ def extract_job_seniority(text):
 Classify based on the full posting, including title, level keywords, and stated
 years of experience when present:
 - "Junior X", "X Intern", "New Grad" -> entry-level
-- "X" or "X II" (no level prefix) -> mid-level
+- "X I" (no level prefix) -> do not infer entry-level from "I" alone
+- "X II", "X III", etc. (no level prefix) -> mid-level
 - "Senior X", "Sr. X" -> senior
 - "Lead X", "Principal X", "Staff X", "X Manager", "X Director" -> lead/principal
 
@@ -1981,7 +2040,7 @@ Return ONLY valid JSON: {"seniority": "<level>"}"""
     if llm_seniority:
         return llm_seniority
 
-    # -- Layer 3: deterministic YoE extraction + title-keyword refinement ------
+    # -- Layer 4: deterministic YoE extraction + title-keyword refinement ------
     yoe = _extract_years_of_experience(text)
     if yoe is not None:
         bucket = _yoe_to_seniority(yoe)
@@ -1992,7 +2051,7 @@ Return ONLY valid JSON: {"seniority": "<level>"}"""
             return 'lead/principal'
         return 'senior'
 
-    # -- Layer 4: rule-based fallback ------------------------------------------
+    # -- Layer 5: rule-based fallback ------------------------------------------
     return _rule_based_job_seniority(text)
 
 def match_seniority(job_seniority, resume_seniority):
@@ -2131,8 +2190,8 @@ def calculate_skill_match_score(job_required_skills, job_preferred_skills, resum
 
 
 def main():
-    """Placeholder CLI entrypoint for local manual checks."""
-    logger.info("job_processor module loaded. No standalone debug action configured.")
+    """Minimal entrypoint placeholder."""
+    pass
 
 
 def map_skills_to_source(resume_text, resume_skills):
@@ -2280,4 +2339,3 @@ def map_skills_to_source(resume_text, resume_skills):
 
 if __name__ == "__main__":
     main()
-

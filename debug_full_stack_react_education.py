@@ -1,4 +1,4 @@
-"""Debug education degree extraction for the Full Stack React AI Engineer role.
+r"""Debug education degree extraction for the Full Stack React AI Engineer role.
 
 Usage:
     .\.venv\Scripts\python.exe debug_full_stack_react_education.py
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.nlp_processor import extract_education, extract_education_with_llm
+from backend.job_processor import extract_education
 
 
 JOB_POSTING_PATH = Path("tests/job_postings/Full Stack React AI Engineer.txt")
@@ -63,15 +63,11 @@ def main() -> int:
 
     print_keyword_lines(text)
 
-    regex_degrees = extract_education(text)
-    print("\n[REGEX DEGREE EXTRACTION]")
-    print(f"- degrees: {regex_degrees}")
+    degrees = extract_education(text)
+    print("\n[DEGREE EXTRACTION]")
+    print(f"- degrees: {degrees}")
 
-    llm_degrees = extract_education_with_llm(text)
-    print("\n[LLM DEGREE EXTRACTION]")
-    print(f"- degrees: {llm_degrees}")
-
-    if not llm_degrees:
+    if not degrees:
         print("\n[RESULT] No degree level was extracted from this role.")
     else:
         print("\n[RESULT] Degree level(s) extracted.")
