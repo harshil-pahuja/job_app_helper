@@ -653,13 +653,18 @@ def _extract_resume_text(upload: UploadFile) -> str:
             )
     else:
         text = raw.decode("utf-8", errors="ignore").strip()
+
+    # Use normalized text length for validation so PDF layout spacing
+    # artifacts don't trigger false too-long/too-short errors.
+    normalized_text = re.sub(r"\s+", " ", text).strip()
+    normalized_len = len(normalized_text)
     
     if not text:
         raise HTTPException(
             status_code=400,
             detail="Uploaded file does not contain any readable text.",
         )
-    if is_pdf and len(text.strip()) < 300:
+    if is_pdf and normalized_len < 300:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -668,7 +673,7 @@ def _extract_resume_text(upload: UploadFile) -> str:
                 "or upload a .docx file."
             ),
         )
-    if is_pdf and len(text.strip()) > 5_500:
+    if is_pdf and normalized_len > 5_500:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -676,7 +681,7 @@ def _extract_resume_text(upload: UploadFile) -> str:
                 "or split it into smaller sections and try again."
             ),
         )
-    if is_word and len(text.strip()) < 300:
+    if is_word and normalized_len < 300:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -684,7 +689,7 @@ def _extract_resume_text(upload: UploadFile) -> str:
                 "Please re-save it as a .pdf file and try again."
             ),
         )
-    if is_word and len(text.strip()) > 5_500:
+    if is_word and normalized_len > 5_500:
         raise HTTPException(
             status_code=400,
             detail=(
