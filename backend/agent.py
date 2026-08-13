@@ -3,8 +3,6 @@ LangChain agent logic for resume and job analysis.
 Handles tool calling, agentic workflows, and response generation.
 """
 from __future__ import annotations
-from http.client import HTTPException
-import json
 from logging import getLogger
 import os
 from pathlib import Path
@@ -19,6 +17,7 @@ from langchain_core.messages import HumanMessage  # type: ignore
 from langchain_core.tools import tool  # type: ignore
 
 from backend.rag_system import RAGSystem, create_retrieve_resume_tool  # type: ignore
+from backend.resume_processor import extract_work_experience_companies
 
 # Load environment variables from .env file
 load_dotenv()
@@ -98,230 +97,13 @@ def extract_weak_bullet_example(resume_text: str) -> dict | None:
     
     return None
 
-def extract_work_experience_companies(resume_text: str) -> list[str]:
-    """
-    Extract company names from ONLY the Work Experiences section of resume.
-    Uses the same robust parsing as map_skills_to_source.
-    Returns list of company names in order of appearance.
-    """
-    import re
-    
-    if not resume_text:
-        return []
-    
-    lines = resume_text.split('\n')
-    companies = []
-    seen = set()
-    in_work_section = False
-    experience_content = []
-    
-    for i, line in enumerate(lines):
-        line_stripped = line.strip()
-        
-        # Check for section headers that indicate work experience
-        if re.search(r'^\s*(Work\s+Experience(s)?|Experience(s)?|Internship(s)?|Employment|Career)\s*(?:\n|:|$)', line, re.IGNORECASE):
-            in_work_section = True
-            continue
-        # Exit work section if we hit other major sections
-        elif re.search(r'^\s*(Projects|Education|Leadership|Awards|Skills|Certifications?|References)\s*(?:\n|:|$)', line, re.IGNORECASE):
-            in_work_section = False
-            continue
-        
-        if in_work_section:
-            experience_content.append(line_stripped)
-
-    work_exp_text = '\n'.join(experience_content)
-
-    if experience_content:
-        # Call to LLM to extract company names to handle different cases 
-        try:
-            validator = ChatOpenAI(model="gpt-4o", timeout=30, max_retries=1)
-            response = validator.invoke(
-            f"""
-You are a resume parsing assistant. 
-Extract the company name from the following line of text, 
-which is part of a candidate's work experience section. 
-Return ONLY valid JSON:
-{{"companies": ["Company A", "Company B"]}}
-
-If no company names can be confidently extracted:
-{{"companies": []}}
-Line: "{work_exp_text}"
-            """
-                    )
-            if DEBUG_PRIVACY_LOGS:
-                print("[VALIDATION RAW RESPONSE]", repr(response.content))
-
-            result = {"companies": []}
-            raw_content = (response.content or "").strip()
-            raw_content = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_content, flags=re.IGNORECASE)
-
-            try:
-                result = json.loads(raw_content)
-            except json.JSONDecodeError as e:
-                print(
-                    "[VALIDATION WARNING] "
-                    "Skipping LLM resume validation because local checks passed but "
-                    f"the LLM returned invalid JSON: {e}"
-                )
-
-            companies_extracted = result.get("companies", [])
-            if isinstance(companies_extracted, str):
-                companies_extracted = [companies_extracted]
-            if not companies_extracted and result.get("company_name"):
-                companies_extracted = [result["company_name"]]
-
-            print(f"[COMPANY EXTRACTION] count={len(companies_extracted)}")
-
-            for company in companies_extracted:
-                company = company.strip()
-                if company and company.lower() != "none" and company not in seen:
-                    companies.append(company)
-                    seen.add(company)
-            
-        except HTTPException:
-            raise HTTPException(status_code=500, detail="LLM validation failed")
-
-        except Exception as e:
-            print(
-                "[VALIDATION WARNING] "
-                "Skipping LLM resume validation because local checks passed but "
-                f"the LLM validation step failed: {type(e).__name__}: {e}"
-            )
-
-    # If LLM validation fails, fall back to local regex extraction
-    if not companies:
-        for line in experience_content:
-            #Regex: Match lines with a pipe separator, capturing left and right sides ("Company | Role" or "Role | Company")
-            work_exp_regex = re.search(r'([A-Z][^|]*?)\s*\|\s*([A-Za-z0-9][A-Za-z0-9\s&\-\.]+?)(?:\s{2,}|$)', line)
-
-            if work_exp_regex and not any(keyword in line.lower() for keyword in ['required', 'preferred', 'qualifications', 'skills:']):
-                left_side = work_exp_regex.group(1).strip()
-                right_side = work_exp_regex.group(2).strip()
-                
-                # Determine which is company vs role with better heuristics
-                # Job title keywords suggest it's a role, not a company
-                job_title_keywords = ['engineer', 'developer', 'manager', 'analyst', 'specialist', 'architect',
-                                        'lead', 'senior', 'junior', 'associate', 'director', 'executive', 'officer',
-                                        'coordinator', 'consultant', 'intern', 'assistant']
-                
-                left_has_title_keywords = any(keyword in left_side.lower() for keyword in job_title_keywords)
-                right_has_title_keywords = any(keyword in right_side.lower() for keyword in job_title_keywords)
-                
-                # If only one side has title keywords, that's the role
-                if left_has_title_keywords and not right_has_title_keywords:
-                    candidate = right_side  # Right side is company
-                elif right_has_title_keywords and not left_has_title_keywords:
-                    candidate = left_side  # Left side is company
-                else:
-                    # Fallback: pick the shorter one as company name (companies are typically shorter)
-                    candidate = left_side if len(left_side) < len(right_side) else right_side
-                
-                # Filter out frameworks and short terms
-                candidate_lower = candidate.lower()
-                
-                # Filter out leadership/organizational terms
-                leadership_terms = ['club', 'organization', 'society', 'association', 
-                                    'board', 'committee', 'president', 'founder', 'group']
-                
-                if (len(candidate) > 5 and 
-                    candidate not in seen and
-                    not any(fw in candidate_lower for fw in ['react', 'node', 'express', 'firebase', 'data science']) and
-                    not any(term in candidate_lower for term in leadership_terms)):
-                    companies.append(candidate)
-                    seen.add(candidate)
-
-    # Some PDFs extract section headers and content onto one long line, e.g.
-    # "EXPERIENCE Google, Sunnyvale..." instead of a standalone "Experience"
-    # header. If the normal section-line parsing found nothing, send a bounded
-    # normalized chunk around the experience heading to the same LLM extractor.
-    if not companies:
-        normalized_text = re.sub(r"\s+", " ", resume_text).strip()
-        experience_match = re.search(
-            r"\b(?:Work\s+Experience(s)?|Experience(s)?|Internship(s)?|Employment|Career)\b",
-            normalized_text,
-            re.IGNORECASE,
-        )
-
-        if experience_match:
-            after_experience = normalized_text[experience_match.end():]
-            next_section_match = re.search(
-                r"\b(?:Projects|Education|Leadership|Awards|Skills|Certifications?|References)\b",
-                after_experience,
-                re.IGNORECASE,
-            )
-            chunk_end = (
-                experience_match.end() + next_section_match.start()
-                if next_section_match
-                else min(len(normalized_text), experience_match.start() + 3500)
-            )
-            bounded_experience_text = normalized_text[experience_match.start():chunk_end][:3500]
-
-            if bounded_experience_text:
-                try:
-                    validator = ChatOpenAI(model="gpt-4o", timeout=30, max_retries=1)
-                    response = validator.invoke(
-                        f"""
-You are a resume parsing assistant.
-Extract employer/company names from this bounded work experience text.
-
-Return ONLY valid JSON:
-{{"companies": ["Company A", "Company B"]}}
-
-If no company names can be confidently extracted:
-{{"companies": []}}
-
-Rules:
-- Include only actual employers, labs, universities, startups, or organizations where the candidate worked.
-- Do not include job titles, dates, locations, skills, bullets, or projects.
-
-Work experience text:
-"{bounded_experience_text}"
-                        """
-                    )
-                    if DEBUG_PRIVACY_LOGS:
-                        print("[COMPANY EXTRACTION BOUNDED RAW RESPONSE]", repr(response.content))
-
-                    result = {"companies": []}
-                    raw_content = (response.content or "").strip()
-                    raw_content = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_content, flags=re.IGNORECASE)
-
-                    try:
-                        result = json.loads(raw_content)
-                    except json.JSONDecodeError as e:
-                        print(
-                            "[VALIDATION WARNING] "
-                            "Skipping bounded company extraction because "
-                            f"the LLM returned invalid JSON: {e}"
-                        )
-
-                    companies_extracted = result.get("companies", [])
-                    if isinstance(companies_extracted, str):
-                        companies_extracted = [companies_extracted]
-                    if not companies_extracted and result.get("company_name"):
-                        companies_extracted = [result["company_name"]]
-
-                    print(f"[COMPANY EXTRACTION BOUNDED] count={len(companies_extracted)}")
-
-                    for company in companies_extracted:
-                        company = company.strip()
-                        if company and company.lower() != "none" and company not in seen:
-                            companies.append(company)
-                            seen.add(company)
-                except HTTPException:
-                    raise HTTPException(status_code=500, detail="LLM validation failed")
-                except Exception as e:
-                    print(
-                        "[VALIDATION WARNING] "
-                        "Skipping bounded company extraction because "
-                        f"the LLM validation step failed: {type(e).__name__}: {e}"
-                    )
-    
-    return companies
-
-
-
-def generate_resume_feedback_prompt(job_title: str, job_description: str, extraction_results: dict, resume_text: str = "") -> str:
+def generate_resume_feedback_prompt(
+    job_title: str,
+    job_description: str,
+    extraction_results: dict,
+    resume_text: str = "",
+    rag_instance: 'RAGSystem' | None = None,
+) -> str:
     """
     Format extraction results into a structured prompt for the AI agent. Utilize the matching results to provide specific feedback.
     
@@ -353,7 +135,7 @@ def generate_resume_feedback_prompt(job_title: str, job_description: str, extrac
     skills_by_source = extraction_results.get('skills_by_source', {})
     
     # Extract company names from resume for context
-    companies = extract_work_experience_companies(resume_text)
+    companies = extract_work_experience_companies(resume_text, rag_instance=rag_instance)
     company_context = (
     f"identified employer names: {', '.join(companies)}"
     if companies

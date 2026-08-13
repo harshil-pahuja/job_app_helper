@@ -18,7 +18,7 @@ from backend.job_processor import (
 )
 from backend.resume_processor import (
     extract_resume_education_degree, extract_resume_education_field,
-    extract_resume_seniority
+    extract_resume_seniority, extract_skills_from_resume, map_skills_to_source
 )
 
 # TODO: Import requests when backend API is ready
@@ -153,7 +153,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                 # Extract job-side fields early so we can compute matches whether or not a resume file is uploaded
                 job_required = extract_qualifications(job_description)[0] if job_description else ""
                 job_preferred = extract_qualifications(job_description)[1] if job_description else ""
-                job_skills = extract_skills(job_description, context='job_posting') if job_description else []
+                job_skills = extract_skills(job_description) if job_description else []
                 expected_education = extract_education(job_description) if job_description else []
                 job_level = extract_job_seniority(job_description) if job_description else None
 
@@ -195,7 +195,8 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                                 os.remove(tmp_path)
 
                     # Compute and display skill-match results (works even without an uploaded PDF)
-                    resume_skills = extract_skills(resume_text, context='resume') if resume_text else []
+                    rag_instance = rag if (resume_text and rag.vectorstore) else None
+                    resume_skills = extract_skills_from_resume(rag_instance=rag_instance, resume_text=resume_text) if resume_text else []
                     
                     # Combine explicit qualifications (required + preferred) and parsed job skills into a single skills list.
                     # Treats required and preferred as one unified "skills" criteria.
@@ -308,7 +309,7 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     job_seniority = extract_job_seniority(job_description) if job_description else None
                     
                     # Extract seniority from resume (graduation-date check → LLM on job-header lines → grad-year math)
-                    resume_seniority = extract_resume_seniority(resume_text=resume_text) if resume_text else None
+                    resume_seniority = extract_resume_seniority(rag_instance=rag_instance, resume_text=resume_text) if resume_text else None
                     
                     # Display extraction results
                     st.write(f"**Job requires:** {job_seniority if job_seniority else 'Not specified'}")
@@ -356,7 +357,6 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     overall_education_match = degree_match
                     
                     # Map skills to their source (work experience, projects, skills section, etc.)
-                    from backend.job_processor import map_skills_to_source
                     skills_by_source = map_skills_to_source(resume_text, resume_skills) if resume_skills else {}
                     
                     extraction_results = {
@@ -386,7 +386,13 @@ if st.button("Analyze & Generate Suggestions", type="primary", use_container_wid
                     job_title = job_description.split('\n')[0].strip() if job_description else "Position"
                     
                     # Generate structured prompt with extraction results and resume text for bullet rewrites
-                    feedback_prompt = generate_resume_feedback_prompt(job_title, job_description, extraction_results, resume_text=resume_text)
+                    feedback_prompt = generate_resume_feedback_prompt(
+                        job_title,
+                        job_description,
+                        extraction_results,
+                        resume_text=resume_text,
+                        rag_instance=rag_instance,
+                    )
                     
                     # Run agent with structured feedback
                     st.subheader("Resume Feedback")

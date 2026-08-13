@@ -165,9 +165,11 @@ function App() {
           <small className="field-hint">
             For maximum accuracy, include the job title, description, and requirements.
           </small>
-          <button type="button" onClick={() => inputJobDescriptionText(false, true)} className="insert-text-button">
-            Insert Sample Job Description
-          </button>
+          <div class="flex-container">
+            <button type="button" onClick={() => inputJobDescriptionText(false, true)} className="insert-text-button">
+              Insert Sample Job Description
+            </button>
+          </div>
           {showJobTextBox && (
             <textarea
               value={jobDescription}
@@ -177,9 +179,11 @@ function App() {
               className="job-textarea"
             />
           )}
-          <button type="button" onClick={() => inputJobDescriptionText(true, false)} className="image-upload-button">
-            Upload Job Description Image
-          </button>
+          <div class="flex-container">
+            <button type="button" onClick={() => inputJobDescriptionText(true, false)} className="image-upload-button">
+              Upload Job Description Image
+            </button>
+          </div>
           {showJobImageUpload && (
             <input
               type="file"
@@ -226,9 +230,11 @@ function App() {
               </div>
             ))}
           </div>
-          <button type="button" onClick={() => inputJobDescriptionText(false, false, true)} className="clear-button">
-            Clear
-          </button>
+          <div className = "flex-container">
+            <button type="button" onClick={() => inputJobDescriptionText(false, false, true)} className="clear-button">
+              Clear
+            </button>
+          </div>
           {clearJobDescription}
         </label>
 

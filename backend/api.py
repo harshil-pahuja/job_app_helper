@@ -31,13 +31,12 @@ load_dotenv()
 
 from backend.agent import generate_resume_feedback_prompt, run_agent_analysis
 from backend.job_processor import (
-    calculate_skill_match_score,
+    check_matched_skills,
     extract_education,
     extract_education_field,
     extract_job_seniority,
     extract_qualifications,
     extract_skills,
-    map_skills_to_source,
     match_education,
     match_seniority,
 )
@@ -45,6 +44,8 @@ from backend.resume_processor import (
     extract_resume_education_degree,
     extract_resume_education_field,
     extract_resume_seniority,
+    extract_skills_from_resume,
+    map_skills_to_source,
 )
 from backend.rag_system import RAGSystem
 
@@ -785,7 +786,7 @@ async def analyze(
     if job_description_text:
         #job_description_text = validate_job_description_text(job_description_text)
         job_required, job_preferred = extract_qualifications(job_description_text)
-        job_skills = extract_skills(job_description_text, context="job_posting")
+        job_skills = extract_skills(job_description_text)
         job_required_education = extract_education(job_description_text)
         job_required_education_fields = extract_education_field(job_description_text)
         job_seniority = extract_job_seniority(job_description_text)
@@ -817,22 +818,38 @@ async def analyze(
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    rag_instance = rag if (resume_text and rag and rag.vectorstore) else None
     if resume_text:
-        resume_skills = extract_skills(resume_text, context="resume")
+        resume_skills = extract_skills_from_resume(rag_instance=rag_instance, resume_text=resume_text)
     else:
         resume_skills = []
 
-    rag_instance = rag if (resume_text and rag and rag.vectorstore) else None
     resume_education = extract_resume_education_degree(rag_instance=rag_instance, resume_text=resume_text or None)
     resume_education_fields = extract_resume_education_field(rag_instance=rag_instance, resume_text=resume_text or None)
-    resume_seniority = extract_resume_seniority(resume_text=resume_text) if resume_text else None
+    resume_seniority = extract_resume_seniority(rag_instance=rag_instance, resume_text=resume_text) if resume_text else None
 
     # ── Skill matching (required + preferred merged into one) ──────────────
     req_bullets = job_required if isinstance(job_required, list) else []
     pref_bullets = job_preferred if isinstance(job_preferred, list) else []
     req_for_match = list(dict.fromkeys(job_skills + req_bullets + pref_bullets))
-    skills_match = calculate_skill_match_score(req_for_match, [], resume_skills)
-    unmatched_skills = [u["job_skill"] for u in skills_match["details"]["required"].get("unmatched", [])]
+    matched_skill_result = check_matched_skills(req_for_match, resume_skills)
+    unmatched_skills = matched_skill_result["unmatched_skills"]
+    skills_match = {
+        "required_matches": matched_skill_result["matched_skills"],
+        "preferred_matches": [],
+        "required_score": matched_skill_result["match_percentage"] / 100.0,
+        "preferred_score": 0.0,
+        "details": {
+            "required": {
+                "matched": [{"job_skill": skill} for skill in matched_skill_result["matched_skills"]],
+                "unmatched": [{"job_skill": skill} for skill in unmatched_skills],
+            },
+            "preferred": {
+                "matched": [],
+                "unmatched": [],
+            },
+        },
+    }
 
     # ── Education matching ─────────────────────────────────────────────────
     education_match = match_education(
@@ -885,7 +902,11 @@ async def analyze(
     if resume_text and rag and rag.vectorstore:
         job_title = job_description_text.split("\n")[0].strip() if job_description_text else "Position"
         feedback_prompt = generate_resume_feedback_prompt(
-            job_title, job_description_text, extraction_results, resume_text=resume_text
+            job_title,
+            job_description_text,
+            extraction_results,
+            resume_text=resume_text,
+            rag_instance=rag,
         )
         try:
             feedback_markdown = run_agent_analysis(feedback_prompt, rag_instance=rag)
