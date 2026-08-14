@@ -8,6 +8,7 @@ Run with:
 
 import io
 import os
+import shutil
 import tempfile
 import time
 import re
@@ -503,9 +504,33 @@ def _configure_tesseract():
             detail="Image OCR is not available on this server. Please install pytesseract.",
         ) from exc
 
-    tesseract_cmd = os.getenv("TESSERACT_CMD")
+    tesseract_cmd = os.getenv("TESSERACT_CMD", "").strip()
+    if not tesseract_cmd:
+        tesseract_cmd = shutil.which("tesseract") or ""
+
+    if not tesseract_cmd:
+        common_windows_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        tesseract_cmd = next((p for p in common_windows_paths if os.path.exists(p)), "")
+
     if tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    try:
+        # Ensures the native Tesseract executable is available and callable.
+        pytesseract.get_tesseract_version()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Image OCR requires the native Tesseract executable. "
+                "Install Tesseract (for Windows: 'winget install UB-Mannheim.TesseractOCR') "
+                "and set TESSERACT_CMD if needed, for example "
+                "'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'."
+            ),
+        ) from exc
 
     _TESSERACT_CONFIGURED = True
     return pytesseract

@@ -3,7 +3,6 @@ Job-processing utilities for job description analysis, extraction, and matching.
 """
 import re
 import json
-from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from difflib import SequenceMatcher
@@ -1447,89 +1446,8 @@ def check_matched_skills(job_skills, resume_skills):
 
 
 def main():
-    """Run all extraction functions across text job postings."""
-    job_postings_dir = Path("tests/job_postings")
-    image_extensions = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
-
-    if not job_postings_dir.exists():
-        print(f"Job postings folder not found: {job_postings_dir}")
-        return
-
-    posting_paths = sorted(
-        path for path in job_postings_dir.iterdir()
-        if path.is_file() and path.suffix.lower() not in image_extensions
-    )
-
-    if not posting_paths:
-        print(f"No non-image job postings found in {job_postings_dir}")
-        return
-
-    print(f"Testing extraction functions for {len(posting_paths)} posting(s)")
-    print("=" * 100)
-
-    for index, posting_path in enumerate(posting_paths, start=1):
-        print(f"\nPosting {index}/{len(posting_paths)}: {posting_path.name}")
-        try:
-            text = posting_path.read_text(encoding="utf-8", errors="ignore")
-            results = {}
-
-            extractor_calls = [
-                ("job_title", lambda t: _extract_job_title(t)),
-                ("skills", lambda t: extract_skills(t)),
-                ("experience", lambda t: extract_experience(t)),
-                ("education", lambda t: extract_education(t)),
-                ("education_fields", lambda t: extract_education_field(t)),
-                ("qualifications", lambda t: extract_qualifications(t)),
-                ("seniority", lambda t: extract_job_seniority(t)),
-            ]
-
-            for name, extractor in extractor_calls:
-                try:
-                    results[name] = extractor(text)
-                except Exception as exc:
-                    results[name] = f"ERROR: {type(exc).__name__}: {exc}"
-
-            print(f"- job_title: {results['job_title']}")
-
-            skills = results["skills"]
-            if isinstance(skills, list):
-                print(f"- skills ({len(skills)}): {skills}")
-            else:
-                print(f"- skills: {skills}")
-
-            print(f"- experience: {results['experience']}")
-
-            education = results["education"]
-            if isinstance(education, list):
-                print(f"- education ({len(education)}): {education}")
-            else:
-                print(f"- education: {education}")
-
-            education_fields = results["education_fields"]
-            if isinstance(education_fields, list):
-                print(f"- education_fields ({len(education_fields)}): {education_fields}")
-            else:
-                print(f"- education_fields: {education_fields}")
-
-            qualifications = results["qualifications"]
-            if (
-                isinstance(qualifications, tuple)
-                and len(qualifications) == 2
-                and isinstance(qualifications[0], list)
-                and isinstance(qualifications[1], list)
-            ):
-                required, preferred = qualifications
-                print(f"- qualifications.required ({len(required)}): {required}")
-                print(f"- qualifications.preferred ({len(preferred)}): {preferred}")
-            else:
-                print(f"- qualifications: {qualifications}")
-
-            print(f"- seniority: {results['seniority']}")
-
-        except Exception as exc:
-            print(f"- ERROR: {type(exc).__name__}: {exc}")
-
-        print("=" * 100)
+    """Module entrypoint intentionally disabled."""
+    pass
 
 
 if __name__ == "__main__":
