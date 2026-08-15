@@ -9,9 +9,11 @@ Run with:
 import io
 import os
 import shutil
+import sys
 import tempfile
 import time
 import re
+from pathlib import Path
 from typing import List, Optional
 
 from docx import Document  # python-docx — used to read .docx resumes
@@ -536,6 +538,40 @@ def _configure_tesseract():
     return pytesseract
 
 
+def clean_ocr_job_description_text(text: str) -> str:
+    """Clean common OCR artifacts from job-description screenshots."""
+    cleaned_lines = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            cleaned_lines.append("")
+            continue
+
+        # Tesseract can read bullets plus ranges like "3-4 years" as "+ 34 years".
+        collapsed_range = re.match(
+            r"^[+*•]\s*([1-9])([1-9])\s+(years?\b.*)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if collapsed_range:
+            start_year, end_year, rest = collapsed_range.groups()
+            line = f"- {start_year}-{end_year} {rest}"
+        else:
+            # Normalize bullet markers only at the start of a line.
+            line = re.sub(r"^[+*•]\s+", "- ", line)
+
+        # Clean up spacing around common OCR-preserved punctuation.
+        line = re.sub(r"\s{2,}", " ", line)
+        line = re.sub(r"\s+([,.;:])", r"\1", line)
+
+        cleaned_lines.append(line)
+
+    cleaned_text = "\n".join(cleaned_lines)
+    cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text)
+    return cleaned_text.strip()
+
+
 def convert_image_input_to_text(image_file: UploadFile) -> str:
     """Extract job-description text from an uploaded image using pytesseract."""
     try:
@@ -595,7 +631,7 @@ def convert_image_input_to_text(image_file: UploadFile) -> str:
             detail=f"Could not read text from the uploaded job description image: {exc}",
         ) from exc
 
-    extracted_text = re.sub(r"\n{3,}", "\n\n", extracted_text).strip()
+    extracted_text = clean_ocr_job_description_text(extracted_text)
     print("Extracted job description text from image:", extracted_text[:200], "..." if len(extracted_text) > 200 else "")
     if len(extracted_text) < 50:
         raise HTTPException(
@@ -606,8 +642,36 @@ def convert_image_input_to_text(image_file: UploadFile) -> str:
             ),
         )
 
+    # Return JSOn response with the extracted text
     return extracted_text
 
+@app.post("/extract-image-text") 
+def extract_image_text_endpoint(
+    request: Request,
+    image_file: List[UploadFile] = File(...),
+):
+    if len(image_file) > 4:
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload no more than 4 job description images.",
+        )
+
+    extracted_text_parts = [
+        convert_image_input_to_text(upload)
+        for upload in image_file
+    ]
+    text = "\n\n".join(part for part in extracted_text_parts if part.strip()).strip()
+
+    if not text:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not extract readable job description text from the uploaded images.",
+        )
+
+    return {
+        "extracted_text": text,
+        "image_count": len(image_file),
+    }
 
 def _extract_resume_text(upload: UploadFile) -> str:
     """Read resume bytes from the upload and return decoded text.
@@ -969,3 +1033,66 @@ async def analyze(
         "qualifications": list(dict.fromkeys(req_bullets + pref_bullets)),
         "feedback_markdown": feedback_markdown,
     }
+
+
+def main():
+    """Debug convert_image_input_to_text() against local image files.
+
+    Usage:
+        python -m backend.api path/to/image.png
+
+    If no image path is provided, this scans tests/job_postings for the three
+    screenshot image files and tests those.
+    """
+    cli_paths = [Path(arg) for arg in sys.argv[1:]]
+    if cli_paths:
+        image_paths = cli_paths
+    else:
+        job_postings_dir = Path("tests/job_postings")
+        image_paths = [
+            path
+            for path in sorted(job_postings_dir.iterdir())
+            if (
+                path.is_file()
+                and path.name.lower().startswith("screenshot")
+                and path.suffix.lower() in SUPPORTED_JOB_IMAGE_EXTENSIONS
+            )
+        ]
+
+    if not image_paths:
+        print("No image files found to test.")
+        return
+
+    print(f"Testing convert_image_input_to_text() on {len(image_paths)} image file(s)")
+    for index, image_path in enumerate(image_paths, start=1):
+        print("\n" + "=" * 80)
+        print(f"Image {index}/{len(image_paths)}: {image_path}")
+
+        if not image_path.exists():
+            print("FAIL: file does not exist")
+            continue
+
+        try:
+            with image_path.open("rb") as image_handle:
+                upload = UploadFile(
+                    filename=image_path.name,
+                    file=image_handle,
+                )
+                extracted_text = convert_image_input_to_text(upload)
+        except HTTPException as exc:
+            print(f"FAIL: HTTPException status={exc.status_code} detail={exc.detail}")
+            continue
+        except Exception as exc:
+            print(f"FAIL: {type(exc).__name__}: {exc}")
+            continue
+
+        preview = extracted_text[:1000]
+        print(f"PASS: extracted_chars={len(extracted_text)}")
+        print("Preview:")
+        print(preview)
+        if len(extracted_text) > len(preview):
+            print("...")
+
+
+if __name__ == "__main__":
+    main()

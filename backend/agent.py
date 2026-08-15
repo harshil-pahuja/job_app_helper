@@ -449,7 +449,7 @@ def run_agent_analysis(prompt: str, rag_instance: 'RAGSystem' | None = None) -> 
         )
         return result["messages"][-1].content
     except openai.RateLimitError:
-        return "Too many requests right now. Please try again in 1 minute."
+        return "Too many requests right now. Please try again after 1 hour."
     except openai.APITimeoutError:
         return "AI feedback is taking too long right now. Please try again in a moment."
     except openai.AuthenticationError:

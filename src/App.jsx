@@ -18,7 +18,7 @@ const STAGE_INTERVAL_MS = 4500;
 function App() {
   const [resumeFile, setResumeFile] = useState(null);
   const [showJobTextBox, setShowJobTextBox] = useState(false);
-  const [showJobImageUpload, setShowJobImageUpload] = useState(false);
+  const [showJobImageUpload, setShowJobImageUpload] = useState(true);
   const [jobImages, setJobImages] = useState([]);
   const [jobDescription, setJobDescription] = useState('');
   const [result, setResult] = useState(null);
@@ -50,10 +50,9 @@ function App() {
       return;
     }
     const hasTextJobDescription = jobDescription.trim().length > 0;
-    const hasImageJobDescription = jobImages.length > 0;
 
-    if (!hasTextJobDescription && !hasImageJobDescription) {
-      setError('Please provide a job description to analyze against, either by pasting text or uploading images.');
+    if (!hasTextJobDescription) {
+      setError('Please upload job description images, extract the text, review it, and then analyze.');
       return;
     }
 
@@ -68,14 +67,17 @@ function App() {
 
     try {
       const formData = new FormData();
-      if (hasTextJobDescription) {
-        formData.append('job_description_text', jobDescription);
-      } else if (hasImageJobDescription) {
-        jobImages.forEach((file) => {
-          formData.append('job_description_image', file);
-        });
-      }
+      formData.append('job_description_text', jobDescription);
       formData.append('resume', resumeFile);
+
+      console.log('[analyze debug] request', {
+        apiBase: API_BASE,
+        endpoint: `${API_BASE}/analyze`,
+        hasTextJobDescription,
+        jobImageCount: jobImages.length,
+        resumeName: resumeFile.name,
+        resumeSize: resumeFile.size,
+      });
 
       const res = await fetch(`${API_BASE}/analyze`, {
         method: 'POST',
@@ -83,13 +85,32 @@ function App() {
         signal: controller.signal,
       });
 
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.detail || errBody.error || errBody.message || `Request failed (${res.status})`);
+      console.log('[analyze debug] response status', {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+      });
+
+      const responseText = await res.text();
+      console.log('[analyze debug] raw response preview', responseText.slice(0, 1000));
+
+      let responseBody = {};
+      try {
+        responseBody = responseText ? JSON.parse(responseText) : {};
+      } catch (parseErr) {
+        console.error('[analyze debug] failed to parse JSON response', parseErr);
+        throw new Error('Backend returned an invalid response.');
       }
 
-      setResult(await res.json());
+      console.log('[analyze debug] parsed response', responseBody);
+
+      if (!res.ok) {
+        throw new Error(responseBody.detail || responseBody.error || responseBody.message || `Request failed (${res.status})`);
+      }
+
+      setResult(responseBody);
     } catch (err) {
+      console.error('[analyze debug] request failed', err);
       if (err.name === 'AbortError') {
         setError('Request timed out. Please try again.');
       } else {
@@ -100,7 +121,7 @@ function App() {
       setLoading(false);
     }
   };
-  // Async function - this can happen any time the user clicks the "Insert Sample Job Description" button or the "Upload Job Description Image" button. It will fetch a sample job description from the backend and set it in the jobDescription state.
+  // Reset the job description input flow.
   async function inputJobDescriptionText(isImageUpload, isTextInput, isClear = false) {
 
     if (isTextInput) {
@@ -117,7 +138,7 @@ function App() {
     if (isClear) {
         setJobDescription('');
         setShowJobTextBox(false);
-        setShowJobImageUpload(false);
+        setShowJobImageUpload(true);
         setClearJobDescription(true);
         setJobImages([]);
     }
@@ -131,7 +152,7 @@ function App() {
           Jobmigo is your AI-powered assistant for maximizing your chances of getting your dream internships and jobs!
         </p>
         <p>
-          Upload your resume and paste the description of the job you are applying for to get personalized feedback on how well you match the role,
+          Upload your resume and job description images to get personalized feedback on how well you match the role,
           along with actionable tips to improve your resume!
         </p>
         <p>
@@ -154,36 +175,14 @@ function App() {
         <label className="field-label">
           <span>Job Description</span>
           <small className="field-hint">
-            Choose whether to paste the job description text or upload images of the job description. 
+            Upload images of the job description, click the "Extract Text from Uploaded images" button, then review the extracted text before analyzing.
           </small>
           <small className="field-hint">
-            Only one method can be used at a time. If you paste text, the image upload will be ignored. If you upload images, the pasted text will be ignored.
-          </small>
-          <small className="field-hint">
-            If you choose to upload images, the system will only process up to 4 images per request.
+            The system will only process up to 4 images per request.
           </small>
           <small className="field-hint">
             For maximum accuracy, include the job title, description, and requirements.
           </small>
-          <div class="flex-container">
-            <button type="button" onClick={() => inputJobDescriptionText(false, true)} className="insert-text-button">
-              Insert Sample Job Description
-            </button>
-          </div>
-          {showJobTextBox && (
-            <textarea
-              value={jobDescription}
-              onChange={(e) => setJobDescription(e.target.value)}
-              placeholder="Paste the job title, description, and requirements..."
-              rows={10}
-              className="job-textarea"
-            />
-          )}
-          <div class="flex-container">
-            <button type="button" onClick={() => inputJobDescriptionText(true, false)} className="image-upload-button">
-              Upload Job Description Image
-            </button>
-          </div>
           {showJobImageUpload && (
             <input
               type="file"
@@ -191,12 +190,11 @@ function App() {
               multiple
               onChange={(e) => {
                 const files = Array.from(e.target.files);
-                if (files.length > 4) {
+                if (jobImages.length + files.length > 4) {
                   setError('You can only upload up to 4 images for the job description. Press the Clear button to reset and try again.');
+                  e.target.value = '';
                   return;
                 }
-                // Here you would handle the image files, e.g., send them to the backend for processing.
-                // For now, we just log them.
                 setJobImages((prevImages) => [...prevImages, ...files]);
                 setError(''); // Clear any previous error
                 e.target.value = ''; // Reset the input so the same file can be selected again if needed
@@ -230,7 +228,57 @@ function App() {
               </div>
             ))}
           </div>
-          <div className = "flex-container">
+          {jobImages.length > 0 && (
+            <div className="verify-ocr-extracted-text">
+              <p>
+                Please verify that the extracted text from the uploaded images is accurate.
+              </p>
+              <p>
+                If the extracted text is incorrect, you can either remove the images and re-upload them, or manually edit the text in the box below.
+              </p>
+              <button
+                type="button"
+                className="ocr-extract-button"
+                onClick={async () => {
+                  try {
+                    const formData = new FormData();
+                    jobImages.forEach((file) => {
+                      formData.append('image_file', file);
+                    });
+
+                    const res = await fetch(`${API_BASE}/extract-image-text`, {
+                      method: 'POST',
+                      body: formData,
+                    });
+
+                    if (!res.ok) {
+                      throw new Error(`Failed to extract text from images. Status: ${res.status}`);
+                    }
+
+                    const data = await res.json();
+                    setJobDescription(data.extracted_text || '');
+                    setShowJobTextBox(true);
+                    setShowJobImageUpload(true);
+                  } catch (err) {
+                    console.error('Error extracting text from images:', err);
+                    setError('Failed to extract text from images. Please try again.');
+                  }
+                }}
+              >
+                Extract Text from Uploaded Images
+              </button>
+              {showJobTextBox && (
+                <textarea
+                  value={jobDescription}
+                  onChange={(e) => setJobDescription(e.target.value)}
+                  placeholder="Review and edit the extracted job description text before analyzing..."
+                  rows={10}
+                  className="job-textarea"
+                />
+              )}
+            </div>
+          )}
+          <div className="flex-container">
             <button type="button" onClick={() => inputJobDescriptionText(false, false, true)} className="clear-button">
               Clear
             </button>
