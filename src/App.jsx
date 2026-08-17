@@ -2,7 +2,20 @@ import React, { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import './App.css';
 
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_BASE;
+const IS_PROD = import.meta.env.PROD;
+
+function isLoopbackApiBase(value) {
+  if (!value) return false;
+
+  try {
+    const parsed = new URL(value);
+    const host = (parsed.hostname || '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch {
+    return false;
+  }
+}
 
 const LOADING_STAGES = [
   'Reading your resume...',
@@ -44,6 +57,16 @@ function App() {
     e.preventDefault();
     setError('');
     setResult(null);
+
+    if (!API_BASE) {
+      setError('VITE_API_BASE is not configured. Please set it before analyzing.');
+      return;
+    }
+
+    if (IS_PROD && isLoopbackApiBase(API_BASE)) {
+      setError('VITE_API_BASE cannot be localhost or loopback in production. Please set a deployed backend URL.');
+      return;
+    }
 
     if (!resumeFile) {
       setError('Please upload a resume document (PDF or Word).');
@@ -240,6 +263,16 @@ function App() {
                 type="button"
                 className="ocr-extract-button"
                 onClick={async () => {
+                  if (!API_BASE) {
+                    setError('VITE_API_BASE is not configured. Please set it before extracting text.');
+                    return;
+                  }
+
+                  if (IS_PROD && isLoopbackApiBase(API_BASE)) {
+                    setError('VITE_API_BASE cannot be localhost or loopback in production. Please set a deployed backend URL.');
+                    return;
+                  }
+
                   try {
                     const formData = new FormData();
                     jobImages.forEach((file) => {
@@ -252,7 +285,14 @@ function App() {
                     });
 
                     if (!res.ok) {
-                      throw new Error(`Failed to extract text from images. Status: ${res.status}`);
+                      let detail = '';
+                      try {
+                        const errorBody = await res.json();
+                        detail = errorBody?.detail || '';
+                      } catch {
+                        // Ignore parse errors and fall back to generic status text.
+                      }
+                      throw new Error(detail || `Failed to extract text from images. Status: ${res.status}`);
                     }
 
                     const data = await res.json();
@@ -261,7 +301,7 @@ function App() {
                     setShowJobImageUpload(true);
                   } catch (err) {
                     console.error('Error extracting text from images:', err);
-                    setError('Failed to extract text from images. Please try again.');
+                    setError(err.message || 'Failed to extract text from images. Please try again.');
                   }
                 }}
               >
