@@ -8,12 +8,9 @@ Run with:
 
 import io
 import os
-import shutil
-import sys
 import tempfile
 import time
 import re
-from pathlib import Path
 from typing import List, Optional
 
 from docx import Document  # python-docx — used to read .docx resumes
@@ -54,17 +51,6 @@ from backend.rag_system import RAGSystem
 
 app = FastAPI(title="Job Application Helper API")
 DEBUG_PRIVACY_LOGS = os.getenv("DEBUG_PRIVACY_LOGS", "").lower() == "true"
-_TESSERACT_CONFIGURED = False
-
-SUPPORTED_JOB_IMAGE_CONTENT_TYPES = {
-    "image/jpeg",
-    "image/jpg",
-    "image/png",
-    "image/webp",
-    "image/bmp",
-    "image/tiff",
-}
-SUPPORTED_JOB_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff")
 
 # ── Rate limiting (slowapi) ──────────────────────────────────────────────────
 # Per-IP limits prevent any single user from burning through the OpenAI budget.
@@ -495,184 +481,6 @@ Document:
         return
     
 
-def _configure_tesseract():
-    """Configure pytesseract lazily so API startup stays lightweight."""
-    global _TESSERACT_CONFIGURED
-    try:
-        import pytesseract  # type: ignore
-    except ImportError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail="Image OCR is not available on this server. Please install pytesseract.",
-        ) from exc
-
-    tesseract_cmd = os.getenv("TESSERACT_CMD", "").strip()
-    if not tesseract_cmd:
-        tesseract_cmd = shutil.which("tesseract") or ""
-
-    if not tesseract_cmd:
-        common_windows_paths = [
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ]
-        tesseract_cmd = next((p for p in common_windows_paths if os.path.exists(p)), "")
-
-    if tesseract_cmd:
-        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-
-    try:
-        # Ensures the native Tesseract executable is available and callable.
-        pytesseract.get_tesseract_version()
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Image OCR requires the native Tesseract executable. "
-                "Install Tesseract (for Windows: 'winget install UB-Mannheim.TesseractOCR') "
-                "and set TESSERACT_CMD if needed, for example "
-                "'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'."
-            ),
-        ) from exc
-
-    _TESSERACT_CONFIGURED = True
-    return pytesseract
-
-
-def clean_ocr_job_description_text(text: str) -> str:
-    """Clean common OCR artifacts from job-description screenshots."""
-    cleaned_lines = []
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            cleaned_lines.append("")
-            continue
-
-        # Tesseract can read bullets plus ranges like "3-4 years" as "+ 34 years".
-        collapsed_range = re.match(
-            r"^[+*•]\s*([1-9])([1-9])\s+(years?\b.*)$",
-            line,
-            flags=re.IGNORECASE,
-        )
-        if collapsed_range:
-            start_year, end_year, rest = collapsed_range.groups()
-            line = f"- {start_year}-{end_year} {rest}"
-        else:
-            # Normalize bullet markers only at the start of a line.
-            line = re.sub(r"^[+*•]\s+", "- ", line)
-
-        # Clean up spacing around common OCR-preserved punctuation.
-        line = re.sub(r"\s{2,}", " ", line)
-        line = re.sub(r"\s+([,.;:])", r"\1", line)
-
-        cleaned_lines.append(line)
-
-    cleaned_text = "\n".join(cleaned_lines)
-    cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text)
-    return cleaned_text.strip()
-
-
-def convert_image_input_to_text(image_file: UploadFile) -> str:
-    """Extract job-description text from an uploaded image using pytesseract."""
-    try:
-        image_file.file.seek(0)
-    except Exception:
-        pass
-
-    raw = image_file.file.read()
-    if not raw:
-        raise HTTPException(status_code=400, detail="Uploaded job description image is empty.")
-
-    max_image_bytes = 8 * 1024 * 1024
-    if len(raw) > max_image_bytes:
-        raise HTTPException(
-            status_code=400,
-            detail="Uploaded job description image is too large. Please upload an image smaller than 8 MB.",
-        )
-
-    content_type = (image_file.content_type or "").lower()
-    filename = (image_file.filename or "").lower()
-    is_supported_image = (
-        content_type in SUPPORTED_JOB_IMAGE_CONTENT_TYPES
-        or filename.endswith(SUPPORTED_JOB_IMAGE_EXTENSIONS)
-    )
-    if not is_supported_image:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported job description image type. Please upload a JPG, JPEG, PNG, WEBP, BMP, or TIFF image.",
-        )
-
-    try:
-        from PIL import Image, ImageOps
-
-        image = Image.open(io.BytesIO(raw)).convert("RGB")
-        image = ImageOps.grayscale(image)
-        pytesseract = _configure_tesseract()
-        ocr_config = "--oem 3 --psm 6"
-        extracted_text = pytesseract.image_to_string(
-            image,
-            lang="eng",
-            config=ocr_config,
-            timeout=20,
-        )
-    except HTTPException:
-        raise
-    except RuntimeError as exc:
-        raise HTTPException(
-            status_code=408,
-            detail=(
-                "Timed out while extracting text from the uploaded job description image. "
-                "Please upload a clearer image or paste the job description text directly."
-            ),
-        ) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not read text from the uploaded job description image: {exc}",
-        ) from exc
-
-    extracted_text = clean_ocr_job_description_text(extracted_text)
-    print("Extracted job description text from image:", extracted_text[:200], "..." if len(extracted_text) > 200 else "")
-    if len(extracted_text) < 50:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Could not extract enough readable job description text from the image. "
-                "Please upload a clearer image or paste the job description text directly."
-            ),
-        )
-
-    # Return JSOn response with the extracted text
-    return extracted_text
-
-@app.post("/extract-image-text") 
-def extract_image_text_endpoint(
-    request: Request,
-    image_file: List[UploadFile] = File(...),
-):
-    if len(image_file) > 4:
-        raise HTTPException(
-            status_code=400,
-            detail="Please upload no more than 4 job description images.",
-        )
-
-    extracted_text_parts = [
-        convert_image_input_to_text(upload)
-        for upload in image_file
-    ]
-    text = "\n\n".join(part for part in extracted_text_parts if part.strip()).strip()
-
-    if not text:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract readable job description text from the uploaded images.",
-        )
-
-    return {
-        "extracted_text": text,
-        "image_count": len(image_file),
-    }
-
 def _extract_resume_text(upload: UploadFile) -> str:
     """Read resume bytes from the upload and return decoded text.
 
@@ -802,7 +610,6 @@ def health():
 async def analyze(
     request: Request,
     job_description_text: str = Form(""),
-    job_description_image: Optional[List[UploadFile]] = File(None),
     resume: Optional[UploadFile] = File(None),
 ):
     """Run the full resume/job analysis pipeline and return JSON.
@@ -812,45 +619,16 @@ async def analyze(
     print(f"[RATE LIMIT KEY] {get_real_ip(request)}")
     resume_text = ""
     resume_error = None
-    job_error = None
-    image_job_description_text = ""
-    job_description_images = job_description_image or []
     try:
         resume_text = _extract_resume_text(resume)
     except HTTPException as exc:
         resume_error = exc.detail
 
-    # If both text input and image input are used, throw an exception stating
-    # that the user should only use one or the other.
-    if job_description_text.strip() and job_description_images:
-        raise HTTPException(
-            status_code=400,
-            detail="Please provide either a job description text or an image, not both. Upload one or the other and try again."
-        )
-
-    if len(job_description_images) > 4:
-        raise HTTPException(
-            status_code=400,
-            detail="You have uploaded too many job description images. Please upload a maximum of 4 images per request."
-        )
-
-    if job_description_images:
-        try:
-            image_job_description_text = "\n\n".join(
-                convert_image_input_to_text(image_file)
-                for image_file in job_description_images
-            )
-        except HTTPException as exc:
-            job_error = exc.detail
-
-    if image_job_description_text:
-        job_description_text = image_job_description_text.strip()
-
-    if job_error is None:
-        try:
-            validate_job_description_text(job_description_text)
-        except HTTPException as exc:
-            job_error = exc.detail
+    job_error = None
+    try:
+        validate_job_description_text(job_description_text)
+    except HTTPException as exc:
+        job_error = exc.detail
 
     if resume_error and job_error:
         raise HTTPException(
@@ -871,7 +649,6 @@ async def analyze(
             detail=f"Job description is too long ({len(job_description_text):,} characters). Please shorten it to under {MAX_JD_CHARS:,} characters.",
         )
     # ── Job-side extraction ────────────────────────────────────────────────
-    validate_job_description_text(job_description_text)
     if job_description_text:
         #job_description_text = validate_job_description_text(job_description_text)
         job_required, job_preferred = extract_qualifications(job_description_text)
@@ -1035,64 +812,3 @@ async def analyze(
     }
 
 
-def main():
-    """Debug convert_image_input_to_text() against local image files.
-
-    Usage:
-        python -m backend.api path/to/image.png
-
-    If no image path is provided, this scans tests/job_postings for the three
-    screenshot image files and tests those.
-    """
-    cli_paths = [Path(arg) for arg in sys.argv[1:]]
-    if cli_paths:
-        image_paths = cli_paths
-    else:
-        job_postings_dir = Path("tests/job_postings")
-        image_paths = [
-            path
-            for path in sorted(job_postings_dir.iterdir())
-            if (
-                path.is_file()
-                and path.name.lower().startswith("screenshot")
-                and path.suffix.lower() in SUPPORTED_JOB_IMAGE_EXTENSIONS
-            )
-        ]
-
-    if not image_paths:
-        print("No image files found to test.")
-        return
-
-    print(f"Testing convert_image_input_to_text() on {len(image_paths)} image file(s)")
-    for index, image_path in enumerate(image_paths, start=1):
-        print("\n" + "=" * 80)
-        print(f"Image {index}/{len(image_paths)}: {image_path}")
-
-        if not image_path.exists():
-            print("FAIL: file does not exist")
-            continue
-
-        try:
-            with image_path.open("rb") as image_handle:
-                upload = UploadFile(
-                    filename=image_path.name,
-                    file=image_handle,
-                )
-                extracted_text = convert_image_input_to_text(upload)
-        except HTTPException as exc:
-            print(f"FAIL: HTTPException status={exc.status_code} detail={exc.detail}")
-            continue
-        except Exception as exc:
-            print(f"FAIL: {type(exc).__name__}: {exc}")
-            continue
-
-        preview = extracted_text[:1000]
-        print(f"PASS: extracted_chars={len(extracted_text)}")
-        print("Preview:")
-        print(preview)
-        if len(extracted_text) > len(preview):
-            print("...")
-
-
-if __name__ == "__main__":
-    main()

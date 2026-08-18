@@ -30,15 +30,11 @@ const STAGE_INTERVAL_MS = 4500;
 
 function App() {
   const [resumeFile, setResumeFile] = useState(null);
-  const [showJobTextBox, setShowJobTextBox] = useState(false);
-  const [showJobImageUpload, setShowJobImageUpload] = useState(true);
-  const [jobImages, setJobImages] = useState([]);
   const [jobDescription, setJobDescription] = useState('');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [stage, setStage] = useState(LOADING_STAGES[0]);
-  const [clearJobDescription, setClearJobDescription] = useState(false);
 
   useEffect(() => {
     if (!loading) return;
@@ -97,7 +93,6 @@ function App() {
         apiBase: API_BASE,
         endpoint: `${API_BASE}/analyze`,
         hasTextJobDescription,
-        jobImageCount: jobImages.length,
         resumeName: resumeFile.name,
         resumeSize: resumeFile.size,
       });
@@ -144,29 +139,6 @@ function App() {
       setLoading(false);
     }
   };
-  // Reset the job description input flow.
-  async function inputJobDescriptionText(isImageUpload, isTextInput, isClear = false) {
-
-    if (isTextInput) {
-        setShowJobTextBox(true);   // Tell React to display it
-        setShowJobImageUpload(false);   // Hide the image upload option
-        setJobImages([]);   // Clear any previously uploaded images
-    }
-
-    if (isImageUpload) {
-        setShowJobImageUpload(true);   // Tell React to display it
-        setShowJobTextBox(false);   // Hide the text input option
-        setJobDescription('');   // Clear any previously pasted text
-    }
-    if (isClear) {
-        setJobDescription('');
-        setShowJobTextBox(false);
-        setShowJobImageUpload(true);
-        setClearJobDescription(true);
-        setJobImages([]);
-    }
-}
-
   return (
     <div className="app-page">
       <header className="app-header">
@@ -175,7 +147,7 @@ function App() {
           Jobmigo is your AI-powered assistant for maximizing your chances of getting your dream internships and jobs!
         </p>
         <p>
-          Upload your resume and job description images to get personalized feedback on how well you match the role,
+          Upload your resume and paste the job description text to get personalized feedback on how well you match the role,
           along with actionable tips to improve your resume!
         </p>
         <p>
@@ -198,132 +170,23 @@ function App() {
         <label className="field-label">
           <span>Job Description</span>
           <small className="field-hint">
-            Upload images of the job description, click the "Extract Text from Uploaded images" button, then review the extracted text before analyzing.
-          </small>
-          <small className="field-hint">
-            The system will only process up to 4 images per request.
+            Paste the full job description text before analyzing.
           </small>
           <small className="field-hint">
             For maximum accuracy, include the job title, description, and requirements.
           </small>
-          {showJobImageUpload && (
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={(e) => {
-                const files = Array.from(e.target.files);
-                if (jobImages.length + files.length > 4) {
-                  setError('You can only upload up to 4 images for the job description. Press the Clear button to reset and try again.');
-                  e.target.value = '';
-                  return;
-                }
-                setJobImages((prevImages) => [...prevImages, ...files]);
-                setError(''); // Clear any previous error
-                e.target.value = ''; // Reset the input so the same file can be selected again if needed
-              }}
-              className="image-input"
-            />
-          )}
-          <div className="image-preview-container">
-            {jobImages.map((file, index) => (
-              <div
-                key={`${file.name}-${file.lastModified}-${index}`}
-                className="image-preview"
-              >
-                <img
-                  src={URL.createObjectURL(file)}
-                  alt={`Uploaded job description ${index + 1}`}
-                />
-
-                <p>{file.name}</p>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setJobImages((prevImages) =>
-                      prevImages.filter((_, imageIndex) => imageIndex !== index)
-                    );
-                  }}
-                >
-                  Remove
-                </button>
-              </div>
-            ))}
-          </div>
-          {jobImages.length > 0 && (
-            <div className="verify-ocr-extracted-text">
-              <p>
-                Please verify that the extracted text from the uploaded images is accurate.
-              </p>
-              <p>
-                If the extracted text is incorrect, you can either remove the images and re-upload them, or manually edit the text in the box below.
-              </p>
-              <button
-                type="button"
-                className="ocr-extract-button"
-                onClick={async () => {
-                  if (!API_BASE) {
-                    setError('VITE_API_BASE is not configured. Please set it before extracting text.');
-                    return;
-                  }
-
-                  if (IS_PROD && isLoopbackApiBase(API_BASE)) {
-                    setError('VITE_API_BASE cannot be localhost or loopback in production. Please set a deployed backend URL.');
-                    return;
-                  }
-
-                  try {
-                    const formData = new FormData();
-                    jobImages.forEach((file) => {
-                      formData.append('image_file', file);
-                    });
-
-                    const res = await fetch(`${API_BASE}/extract-image-text`, {
-                      method: 'POST',
-                      body: formData,
-                    });
-
-                    if (!res.ok) {
-                      let detail = '';
-                      try {
-                        const errorBody = await res.json();
-                        detail = errorBody?.detail || '';
-                      } catch {
-                        // Ignore parse errors and fall back to generic status text.
-                      }
-                      throw new Error(detail || `Failed to extract text from images. Status: ${res.status}`);
-                    }
-
-                    const data = await res.json();
-                    setJobDescription(data.extracted_text || '');
-                    setShowJobTextBox(true);
-                    setShowJobImageUpload(true);
-                  } catch (err) {
-                    console.error('Error extracting text from images:', err);
-                    setError(err.message || 'Failed to extract text from images. Please try again.');
-                  }
-                }}
-              >
-                Extract Text from Uploaded Images
-              </button>
-              {showJobTextBox && (
-                <textarea
-                  value={jobDescription}
-                  onChange={(e) => setJobDescription(e.target.value)}
-                  placeholder="Review and edit the extracted job description text before analyzing..."
-                  rows={10}
-                  className="job-textarea"
-                />
-              )}
-            </div>
-          )}
+          <textarea
+            value={jobDescription}
+            onChange={(e) => setJobDescription(e.target.value)}
+            placeholder="Paste the complete job description text here..."
+            rows={14}
+            className="job-textarea"
+          />
           <div className="flex-container">
-            <button type="button" onClick={() => inputJobDescriptionText(false, false, true)} className="clear-button">
+            <button type="button" onClick={() => setJobDescription('')} className="clear-button">
               Clear
             </button>
           </div>
-          {clearJobDescription}
         </label>
 
         <button type="submit" disabled={loading} className="submit-button">
