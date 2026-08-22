@@ -70,21 +70,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # development, plus any additional origins listed in FRONTEND_URL env var
 # (comma-separated). In production, set FRONTEND_URL to your deployed
 # frontend's URL, e.g. "https://jobmigo.vercel.app".
-_dev_origins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-]
-_prod_origins = [
-    o.strip() for o in os.getenv("FRONTEND_URL", "").split(",") if o.strip()
-]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_dev_origins + _prod_origins,
+    allow_origins=["https://www.job-migo.com", "https://job-migo.com"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
