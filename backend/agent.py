@@ -37,7 +37,7 @@ def read_project_readme() -> str:
 
 def create_job_agent(rag_instance: 'RAGSystem' | None = None):
     """Initialize and return a configured LangChain agent."""
-    model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
+    model = ChatOpenAI(model="gpt-5.6-terra", reasoning_effort="none", timeout=60, max_retries=2)
     tools = [read_project_readme]
     if rag_instance:
         retrieve_tool = create_retrieve_resume_tool(rag_instance)
@@ -459,7 +459,7 @@ def run_agent_analysis(prompt: str, rag_instance: 'RAGSystem' | None = None) -> 
     except openai.APIConnectionError:
         return "Could not reach the AI service. Please check your connection and try again."
     except openai.APIError as e:
-        logger.error("OpenAI API error during agent analysis", e)
+        logger.exception("OpenAI API error during agent analysis", e)
         return "AI feedback is temporarily unavailable. Please try again later."
     except Exception:
         logger.error("Unexpected error in agent analysis", exc_info=DEBUG_PRIVACY_LOGS)
