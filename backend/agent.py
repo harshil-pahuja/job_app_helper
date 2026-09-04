@@ -459,7 +459,7 @@ def run_agent_analysis(prompt: str, rag_instance: 'RAGSystem' | None = None) -> 
     except openai.APIConnectionError:
         return "Could not reach the AI service. Please check your connection and try again."
     except openai.APIError:
-        logger.error("OpenAI API error during agent analysis")
+        logger.error("OpenAI API error during agent analysis", e)
         return "AI feedback is temporarily unavailable. Please try again later."
     except Exception:
         logger.error("Unexpected error in agent analysis", exc_info=DEBUG_PRIVACY_LOGS)
