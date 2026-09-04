@@ -218,7 +218,7 @@ def validate_job_description_text(text: str) -> None:
 
     try:
         validator = ChatOpenAI(
-            model="gpt-4o",
+            model="gpt-5.6-terra",
             temperature=0,
             timeout=30,
             max_retries=1,
@@ -376,7 +376,7 @@ def validate_resume_text(text: str) -> None:
     try:
 
         validator = ChatOpenAI(
-            model="gpt-4o",
+            model="gpt-5.6-terra",
             temperature=0
         )
 
