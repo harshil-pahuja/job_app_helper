@@ -37,7 +37,7 @@ def read_project_readme() -> str:
 
 def create_job_agent(rag_instance: 'RAGSystem' | None = None):
     """Initialize and return a configured LangChain agent."""
-    model = ChatOpenAI(model="gpt-5.6", timeout=60, max_retries=2)
+    model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
     tools = [read_project_readme]
     if rag_instance:
         retrieve_tool = create_retrieve_resume_tool(rag_instance)
