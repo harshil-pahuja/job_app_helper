@@ -54,7 +54,7 @@ def detect_skill_aliases(skills):
     )
 
     try:
-        model = ChatOpenAI(model='gpt-4o', temperature=0, timeout=60, max_retries=2)
+        model = ChatOpenAI(model='gpt-5.6-terra', temperature=0, timeout=60, max_retries=2)
         system_prompt = f"""You normalize extracted technical skills into normalized names.
 
 Return ONLY valid JSON in this exact format:
@@ -134,7 +134,7 @@ def is_generic(skill):
         return True
 
     try:
-        model = ChatOpenAI(model='gpt-4o', temperature=0, timeout=60, max_retries=2)
+        model = ChatOpenAI(model='gpt-5.6-terra', temperature=0, timeout=60, max_retries=2)
         system_prompt = """You are filtering extracted skill candidates from job postings and resumes.
 
 Return ONLY valid JSON in this exact format:
@@ -250,7 +250,7 @@ def extract_skills(text):
 
     llm_skills = set()
     try:
-        model = ChatOpenAI(model='gpt-4o', timeout=60, max_retries=2)
+        model = ChatOpenAI(model='gpt-5.6-terra', timeout=60, max_retries=2)
 
         system_prompt = """You are a skills extraction expert. Extract required and preferred skills from a job posting.
 
@@ -332,7 +332,7 @@ def extract_experience(text):
     llm_phrases = []
     llm_years = None
     try:
-        model = ChatOpenAI(model="gpt-4o", temperature=0, timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", temperature=0, timeout=60, max_retries=2)
         system_prompt = """You extract experience requirements from job postings and resumes.
 
 Return ONLY valid JSON in this exact format:
@@ -421,7 +421,7 @@ def extract_education(text):
 
     llm_degrees = []
     try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
 
         system_prompt = """You are an education requirements extraction expert. Extract ONLY degree types from the text.
 
@@ -500,7 +500,7 @@ def extract_education_field(text):
 
     llm_validated_fields = []
     try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
 
         system_prompt = """You are a STRICT education field extraction expert. Your task is to extract ONLY explicitly required education fields/majors from text.
 
@@ -908,7 +908,7 @@ def extract_qualifications(text):
     llm_preferred = []
 
     try:
-        model = ChatOpenAI(model="gpt-4o", temperature=0, timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", temperature=0, timeout=60, max_retries=2)
         system_prompt = """You are a job posting qualification extraction expert.
 Extract only candidate qualifications from the job posting.
 
@@ -1178,7 +1178,7 @@ def _extract_job_title(text):
     # Layer 3: LLM title extraction from cleaned top content.
     if cleaned_top_text:
         try:
-            model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+            model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
             system_prompt = """You extract job titles from job postings.
 
 Return ONLY valid JSON in this exact format:
@@ -1303,7 +1303,7 @@ def extract_job_seniority(text):
     # -- Layer 4: LLM ----------------------------------------------------------
     llm_seniority = None
     try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
         system_prompt = """You are a job posting analyst. Classify the seniority level required by the posting into exactly one of these four categories:
 
 - "entry-level"    : 0-2 years experience, intern / graduate / junior roles
