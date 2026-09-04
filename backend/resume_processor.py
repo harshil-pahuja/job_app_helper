@@ -69,7 +69,7 @@ def extract_resume_education_degree(rag_instance=None, resume_text=None):
 
     # Layer 3 - LLM fallback (only reached when regex found nothing)
     try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
         from langchain_core.messages import HumanMessage, SystemMessage
 
         system_prompt = """You are an education extraction expert reading a resume.
@@ -103,7 +103,7 @@ def extract_resume_education_field(rag_instance=None, resume_text=None):
 
     Layer order:
       1. RAG retrieves the education section with a targeted query
-      2. LLM (GPT-4o) extracts the field from the retrieved chunk text - preferred
+      2. LLM (GPT-5.6-terra) extracts the field from the retrieved chunk text - preferred
          because it handles formats like "Bachelor of Arts in Psychology" correctly
          where regex would capture "Arts" instead of "Psychology"
       3. Regex fallback when LLM is unavailable (no API key) or returns empty
@@ -138,7 +138,7 @@ def extract_resume_education_field(rag_instance=None, resume_text=None):
     # Layer 2 - LLM (preferred when API is available; more accurate than regex for
     # formats like "Bachelor of Arts in Psychology" where regex captures "Arts")
     try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
         from langchain_core.messages import HumanMessage, SystemMessage
 
         system_prompt = """You are an education extraction expert reading a resume.
@@ -252,7 +252,7 @@ def extract_resume_seniority(rag_instance=None, resume_text=None, graduation_dat
     if job_header_lines:
         try:
             from langchain_core.messages import HumanMessage, SystemMessage
-            model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+            model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
             lines_text = "\n".join(job_header_lines[:20])
 
             system_prompt = """You are a career-level expert.
@@ -327,7 +327,7 @@ def extract_skills_from_resume(rag_instance=None, resume_text=None):
 
     # Layer 2 - LLM extraction
     try:
-        model = ChatOpenAI(model="gpt-4o", timeout=60, max_retries=2)
+        model = ChatOpenAI(model="gpt-5.6-terra", timeout=60, max_retries=2)
         from langchain_core.messages import HumanMessage, SystemMessage
 
         system_prompt = """You are a skills extraction expert reading a resume.
@@ -442,7 +442,7 @@ def extract_work_experience_companies(resume_text: str, rag_instance=None) -> li
 
     if candidate_experience_text.strip():
         try:
-            validator = ChatOpenAI(model="gpt-4o", timeout=30, max_retries=1)
+            validator = ChatOpenAI(model="gpt-5.6-terra", timeout=30, max_retries=1)
             response = validator.invoke(
                 f"""
 You are a resume parsing assistant.
