@@ -256,7 +256,7 @@ class RAGSystem:
 
         try:
             model = ChatOpenAI(
-                model=os.getenv("RAG_HEADER_CLASSIFIER_MODEL", "gpt-4o-mini"),
+                model=os.getenv("RAG_HEADER_CLASSIFIER_MODEL", "gpt-5.6-terra"),
                 temperature=0,
                 timeout=20,
                 max_retries=1,
@@ -366,7 +366,7 @@ class RAGSystem:
         canonical_sections = list(default_aliases.keys())
 
         try:
-            model = ChatOpenAI(model="gpt-4o-mini", temperature=0, timeout=30, max_retries=1)
+            model = ChatOpenAI(model="gpt-5.6-terra", temperature=0, timeout=30, max_retries=1)
             response = model.invoke(
                 [
                     SystemMessage(
